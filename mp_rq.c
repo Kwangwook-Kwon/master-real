@@ -6,7 +6,7 @@
 
 #define PORT_NUM 1
 #define ENTRY_SIZE 9000 /* The maximum size of each received packet - set to jumbo frame */
-#define RQ_NUM_DESC 512 /* The maximum receive ring length without processing */
+#define RQ_NUM_DESC 2048 /* The maximum receive ring length without processing */
 
 /* The MAC we are listening to. In case your setup is via a network switch, you may need to change the MAC address to suit the network port MAC */
 
@@ -231,7 +231,8 @@ int main()
              * -index of descriptor completing
              * -size of the incoming packets
              */
-            printf("message %ld received size %d\n", wc.wr_id, wc.byte_len);
+            //printf("message %ld received size %d\n", wc.wr_id, wc.byte_len);
+            printf("%02hhx\n\n", (unsigned char *) sg_entry.addr  );
             sg_entry.addr = (uint64_t)buf + wc.wr_id * ENTRY_SIZE;
             wr.wr_id = wc.wr_id;
             /* after processed need to post back buffer */
