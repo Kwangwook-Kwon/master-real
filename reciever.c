@@ -3,7 +3,15 @@
 #include <stdio.h>
 #include <unistd.h>
 #include <string.h>
+#include <sys/time.h>
+#include <stdint.h>
 #include <pthread.h>
+#include <math.h>
+#include <linux/if_ether.h>
+#include <netinet/ip.h>
+#include <netinet/udp.h>
+#include "header.h"
+#include "sender.h"
 
 #define PORT_NUM 1
 #define ENTRY_SIZE 9000  /* The maximum size of each received packet - set to jumbo frame */
@@ -1015,6 +1023,7 @@ struct ibv_context *context;
 struct ibv_pd *pd;
 
 uint64_t total_recv;
+u_int16_t recv_seq = 0;
 
 void *revieving_function()
 {
@@ -1022,7 +1031,7 @@ void *revieving_function()
     /* 4. Create Complition Queue (CQ) */
     struct ibv_cq *cq, *cq_send;
     cq = ibv_create_cq(context, RQ_NUM_DESC, NULL, NULL, 0);
-    cq_send = ibv_create_cq(context, RQ_NUM_DESC, NULL, NULL, 0);
+    cq_send = ibv_create_cq(context, SQ_NUM_DESC, NULL, NULL, 0);
 
     if (!cq)
     {
@@ -1040,7 +1049,7 @@ void *revieving_function()
         .recv_cq = cq,
         .cap = {
             /* no send ring */
-            .max_send_wr = RQ_NUM_DESC,
+            .max_send_wr = SQ_NUM_DESC,
             /* maximum number of packets in ring */
             .max_recv_wr = RQ_NUM_DESC,
             /* only one pointer per descriptor */
@@ -1236,17 +1245,28 @@ void *revieving_function()
             //        printf("\n");
             //}
             //printf("\n\n\n");
+            struct ethhdr *eth = (struct ethhdr *)(  (char *)buf + wc.wr_id * ENTRY_SIZE);
+            struct vlan_hdr *vlan = (struct vlan_hdr *)(eth + 1);
+            struct iphdr *ip = (struct iphdr *)(vlan + 1);
+            struct lcchdr *lcc = (struct lcchdr *)(ip + 1);
+            if (lcc->seq - recv_seq != 1 && lcc->seq != 0x0000 ){
+                printf("Packet Loss Detected!!!!\n");
+                printf("Current SEQ :  %ld\n", lcc -> seq);
+                printf("Previous SEQ :  %ld\n", recv_seq);
+            }
+            recv_seq = lcc->seq;
 
             sg_entry.addr = (uint64_t)buf + wc.wr_id * ENTRY_SIZE;
             wr.wr_id = wc.wr_id;
+            printf("wr_id: %d", wr.wr_id);
             //memcpy(buf_send, packet, sizeof(packet));
-            ret = ibv_post_send(qp, &wr_send, &bad_wr_send);
-            if (ret < 0)
-            {
-                fprintf(stderr, "failed in post send\n");
-                exit(1);
-            }
-            msgs_completed = ibv_poll_cq(cq_send, 1, &wc);
+            //ret = ibv_post_send(qp, &wr_send, &bad_wr_send);
+            //if (ret < 0)
+            //{
+            //    fprintf(stderr, "failed in post send\n");
+            //   exit(1);
+            //}
+            //msgs_completed = ibv_poll_cq(cq_send, 1, &wc);
             /* after processed need to post back buffer */
 
             ibv_post_recv(qp, &wr, &bad_wr);

@@ -40,75 +40,176 @@ void create_data_packet(void *buf)
     ip->check = 0;
     memcpy(&ip->saddr, g_src_ip, 4);
     memcpy(&ip->daddr, g_dst_ip, 4);
-    ip->check = gen_checksum((char *)ip, sizeof(struct iphdr));
+    ip->check = gen_ip_checksum((char *)ip, sizeof(struct iphdr));
 
     //LCC Header
     struct lcchdr *lcc = (struct lcchdr *)(ip + 1);
-    memset(lcc,0,sizeof(struct lcchdr));
+    memset(lcc, 0, sizeof(struct lcchdr));
     size_t lcc_len = ip_len - sizeof(struct iphdr);
     lcc->source = UDP_SRC;
     lcc->dest = UDP_DST;
-    lcc->len = lcc_len;
-    lcc->check = 0;    //Zero means no checksum check at revciever
-    lcc ->data = 1;
+    lcc->len = htons((uint16_t)lcc_len);
+    lcc->check = 0; //Zero means no checksum check at revciever
+    lcc->data = 1;
+    lcc->seq = g_send_seq;
+    g_send_seq++;
 
-    // Payload : Data
+    // Payload : Data150
     void *payload = lcc + 1;
-    char D ='D';
-    memset(payload, D , lcc_len - sizeof(struct lcchdr) );
+    char D = 'D';
+    memset(payload, D, lcc_len - sizeof(struct lcchdr));
 }
 
-static uint16_t gen_checksum(const char *buf, int num_bytes)
+void create_dummy_packet(void *buf)
 {
-        const uint16_t *half_words = (const uint16_t *)buf;
-        unsigned sum = 0;
-        for (int i = 0; i < num_bytes / 2; i++)
-                sum += half_words[i];
+    // Ether header
+    struct ethhdr *eth = (struct ethhdr *)buf;
+    memcpy(eth->h_dest, g_dst_mac_addr, ETH_ALEN);
+    memcpy(eth->h_source, g_src_mac_addr, ETH_ALEN);
+    eth->h_proto = htons(ETH_P_ARP);
 
-        if (num_bytes & 1)
-                sum += buf[num_bytes - 1];
+    struct arphdr *arp = (struct arphdr *)(eth + 1);
+    arp->ar_hrd = 0x0001;
+    arp->ar_pro = 0x0800;
+    arp->ar_hln = 6;
+    arp->ar_pln = 4;
+    arp->ar_op = 0x0001;
 
-        sum = (sum & 0xffff) + (sum >> 16);
-        sum += (sum & 0xff0000) >> 16;
-        sum = ~sum & 0xffff;
-
-        return sum;
+    memcpy(arp->ar_sha, g_src_mac_addr, ETH_ALEN);
+    memcpy(arp->ar_sip, g_src_ip, 4);
+    memcpy(arp->ar_tha, g_brd_mac_addr, ETH_ALEN);
+    memcpy(arp->ar_tip, g_src_ip, 4);
 }
 
-
-void *sending_fucntion(void *id)
+void create_send_work_request(struct ibv_send_wr *wr, struct ibv_sge *sg_entry, struct ibv_mr *mr, void *buf, uint64_t wr_id, enum Packet_type packet_type)
 {
-    void *buf;                               //sending buffer address
+    /* scatter/gather entry describes location and size of data to send*/
+    sg_entry->addr = (uint64_t)buf;
+    //if(packet_type == DATA)
+    sg_entry->length = DATA_PACKET_SIZE;
+    //else if(packet_type == DUMMY)
+    //    sg_entry->length = 10;
+    sg_entry->lkey = mr->lkey;
+    memset(wr, 0, sizeof(struct ibv_send_wr));
+    /*
+     * descriptor for send transaction - details:
+     * - how many pointer to data to use
+     * - if this is a single descriptor or a list (next == NULL single)
+     * - if we want inline and/or completion
+     */
+
+    wr->num_sge = 1;
+    wr->sg_list = sg_entry;
+    wr->next = NULL;
+    wr->opcode = IBV_WR_SEND;
+    wr->send_flags = IBV_SEND_SIGNALED;
+    wr->wr_id = wr_id;
+}
+
+void create_recv_work_request(struct ibv_qp *qp, struct ibv_recv_wr *wr, struct ibv_sge *sg_entry, struct ibv_mr *mr, void *buf, struct raw_eth_flow_attr *flow_attr)
+{
+    struct ibv_recv_wr *bad_wr;
+    /* pointer to packet buffer size and memory key of each packet buffer */
+    sg_entry->length = ENTRY_SIZE;
+    sg_entry->lkey = mr->lkey;
+    /*
+    * descriptor for receive transaction - details:
+    * - how many pointers to receive buffers to use
+    * - if this is a single descriptor or a list (next == NULL single)
+    */
+
+    wr->num_sge = 1;
+    wr->sg_list = sg_entry;
+    wr->next = NULL;
+    for (int n = 0; n < RQ_NUM_DESC; n++)
+    {
+        /* each descriptor points to max MTU size buffer */
+        sg_entry->addr = (uint64_t)buf + ENTRY_SIZE * n;
+
+        /* index of descriptor returned when packet arrives */
+        wr->wr_id = n;
+
+        ibv_post_recv(qp, wr, &bad_wr);
+    }
+
+    /* Register steering rule to intercept packet to DEST_MAC and place packet in ring pointed by ->qp */
+
+    /*flow_attr->attr.comp_mask = 0;
+    flow_attr->attr.type = IBV_FLOW_ATTR_NORMAL;
+    flow_attr->attr.size = sizeof(struct ibv_flow_attr);
+    flow_attr->attr.priority = 0;
+    flow_attr->attr.num_of_specs = 1;
+    flow_attr->attr.port = PORT_NUM;
+    flow_attr->attr.flags = 0;
+
+    flow_attr->spec_eth.type = IBV_EXP_FLOW_SPEC_ETH;
+    flow_attr->spec_eth.size = sizeof(struct ibv_flow_spec_eth);
+    memcpy(&flow_attr->spec_eth.val.dst_mac, g_eth_pause_addr, ETH_ALEN);
+    memset(&flow_attr->spec_eth.val.src_mac, 0, ETH_ALEN);
+    flow_attr->spec_eth.val.ether_type = ETH_P_PAUSE;
+    flow_attr->spec_eth.val.vlan_tag = 0;
+
+    memset(&flow_attr->spec_eth.mask.dst_mac, 0xFF, ETH_ALEN);
+    memset(&flow_attr->spec_eth.mask.src_mac, 0x00, ETH_ALEN);
+
+    flow_attr->spec_eth.mask.ether_type = 0;
+    flow_attr->spec_eth.mask.vlan_tag = 0;*/
+}
+
+static uint16_t gen_ip_checksum(const char *buf, int num_bytes)
+{
+    const uint16_t *half_words = (const uint16_t *)buf;
+    unsigned sum = 0;
+    for (int i = 0; i < num_bytes / 2; i++)
+        sum += half_words[i];
+
+    if (num_bytes & 1)
+        sum += buf[num_bytes - 1];
+
+    sum = (sum & 0xffff) + (sum >> 16);
+    sum += (sum & 0xff0000) >> 16;
+    sum = ~sum & 0xffff;
+
+    return sum;
+}
+
+void *thread_fucntion(void *thread_arg)
+{
+    struct Thread_arg *args = (struct Thread_arg *)thread_arg;
+    int thread_id = args->thread_id;
+    int thread_action = args->thread_action;
+
     int ret;
-    int thread_id = *((int *)id);
-    /* 4. Create Complition Queue (CQ) */
-    struct ibv_cq *cq;
-    cq = ibv_create_cq(context, SQ_NUM_DESC, NULL, NULL, 0);
-    if (!cq)
+    /* 1. Create Complition Queue (CQ) */
+    struct ibv_cq *cq_send;
+    struct ibv_cq *cq_recv;
+    cq_send = ibv_create_cq(context, SQ_NUM_DESC, NULL, NULL, 0);
+    cq_recv = ibv_create_cq(context, RQ_NUM_DESC, NULL, NULL, 0);
+    if (!cq_send || !cq_recv)
     {
         fprintf(stderr, "Couldn't create CQ %d\n", errno);
         exit(1);
     }
 
-    /* 5. Initialize QP */
+    /* 2. Initialize QP */
     struct ibv_qp *qp;
     struct ibv_qp_init_attr qp_init_attr = {
         .qp_context = NULL,
         /* report send completion to cq */
-        .send_cq = cq,
-        .recv_cq = cq,
+        .send_cq = cq_send,
+        .recv_cq = cq_recv,
         .cap = {
             /* number of allowed outstanding sends without waiting for a completion */
             .max_send_wr = SQ_NUM_DESC,
+            .max_recv_wr = RQ_NUM_DESC,
             /* maximum number of pointers in each descriptor */
             .max_send_sge = 1,
-            /* if inline maximum of payload data in the descriptors themselves */
-            //.max_inline_data = 970,
-            .max_recv_wr = 0},
+            .max_recv_sge = 1,
+        },
         .qp_type = IBV_QPT_RAW_PACKET,
     };
 
-    /* 6. Create Queue Pair (QP) - Send Ring */
+    /* 3. Create Queue Pair (QP) - Work request Ring */
     qp = ibv_create_qp(pd, &qp_init_attr);
     if (!qp)
     {
@@ -116,8 +217,7 @@ void *sending_fucntion(void *id)
         exit(1);
     }
 
-    /* 7. Initialize the QP (receive ring) and assign a port */
-
+    /* 4. Initialize the QP (receive ring) and assign a port */
     struct ibv_qp_attr qp_attr;
     int qp_flags;
     memset(&qp_attr, 0, sizeof(qp_attr));
@@ -133,7 +233,7 @@ void *sending_fucntion(void *id)
 
     memset(&qp_attr, 0, sizeof(qp_attr));
 
-    /* 8. Move the ring to ready to send in two steps (a,b) */
+    /* 5. Move the ring to ready to send in two steps (a,b) */
     /* a. Move ring state to ready to receive, this is needed to be able to move ring to ready to send even if receive queue is not enabled */
     qp_flags = IBV_QP_STATE;
     qp_attr.qp_state = IBV_QPS_RTR;
@@ -145,7 +245,6 @@ void *sending_fucntion(void *id)
     }
 
     /* b. Move the ring to ready to send */
-
     qp_flags = IBV_QP_STATE;
     qp_attr.qp_state = IBV_QPS_RTS;
     ret = ibv_modify_qp(qp, &qp_attr, qp_flags);
@@ -155,57 +254,104 @@ void *sending_fucntion(void *id)
         exit(1);
     }
 
-    /* 9. Allocate Memory */
-    buf = malloc(buf_size);
-    if (!buf)
+    /* 9. Allocate Memory for send packet */
+    void *buf_send; //sending buffer address
+    void *buf_recv; //recving buffer address
+    buf_send = malloc(buf_size);
+    buf_recv = malloc(buf_size);
+    if (!buf_send || !buf_recv)
     {
         fprintf(stderr, "Coudln't allocate memory\n");
         exit(1);
     }
 
     /* 10. Register the user memory so it can be accessed by the HW directly */
-    struct ibv_mr *mr;
-    mr = ibv_reg_mr(pd, buf, buf_size, IBV_ACCESS_LOCAL_WRITE);
-    if (!mr)
+    struct ibv_mr *mr_send;
+    struct ibv_mr *mr_recv;
+    mr_send = ibv_reg_mr(pd, buf_send, buf_size, IBV_ACCESS_LOCAL_WRITE);
+    mr_recv = ibv_reg_mr(pd, buf_recv, buf_size, IBV_ACCESS_LOCAL_WRITE);
+    if (!mr_send || !mr_recv)
     {
         fprintf(stderr, "Couldn't register mr\n");
         exit(1);
     }
 
-    //memcpy(buf, packet, sizeof(packet));
-    unsigned int n;
-    struct ibv_sge sg_entry;
-    struct ibv_send_wr wr, *bad_wr;
-    int msgs_completed;
+    //Work request(WR)
+    struct ibv_sge sg_entry_send[SQ_NUM_DESC];
+    struct ibv_sge sg_entry_recv;
+    struct ibv_send_wr wr_send[SQ_NUM_DESC], *bad_wr_send;
+    struct ibv_recv_wr wr_recv, *bad_wr_recv;
     struct ibv_wc wc;
-    /* scatter/gather entry describes location and size of data to send*/
-    sg_entry.addr = (uint64_t)buf;
-    sg_entry.length = DATA_PACKET_SIZE;
-    sg_entry.lkey = mr->lkey;
-    memset(&wr, 0, sizeof(wr));
-    /*
-     * descriptor for send transaction - details:
-     * - how many pointer to data to use
-     * - if this is a single descriptor or a list (next == NULL single)
-     * - if we want inline and/or completion
-     */
+    struct raw_eth_flow_attr flow_attr_pause_recv;
+    struct raw_eth_flow_attr
+    {
+        struct ibv_flow_attr attr;
+        struct ibv_flow_spec_eth spec_eth;
+    } __attribute__((packed)) flow_attr = {
+        .attr = {
+            .comp_mask = 0,
+            .type = IBV_FLOW_ATTR_NORMAL,
+            .size = sizeof(flow_attr),
+            .priority = 0,
+            .num_of_specs = 1,
+            .port = PORT_NUM,
+            .flags = 0,
+        },
+        .spec_eth = {.type = IBV_EXP_FLOW_SPEC_ETH, .size = sizeof(struct ibv_flow_spec_eth), .val = {
+                                                                                                  .dst_mac = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+                                                                                                  .src_mac = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+                                                                                                  .ether_type = 0x8808,
+                                                                                                  .vlan_tag = 0,
+                                                                                              },
+                     .mask = {
+                         .dst_mac = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+                         .src_mac = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+                         .ether_type = 0xFFFF,
+                         .vlan_tag = 0,
+                     }},
+    };
 
-    wr.num_sge = 1;
-    wr.sg_list = &sg_entry;
-    wr.next = NULL;
-    wr.opcode = IBV_WR_SEND;
-    wr.send_flags = IBV_SEND_SIGNALED;
+    /* 13. Create steering rule */
+    struct ibv_flow *eth_flow;
+    eth_flow = ibv_create_flow(qp, &flow_attr.attr);
+    if (!eth_flow)
+    {
+        fprintf(stderr, "Couldn't attach steering flow\n");
+        exit(1);
+    }
 
+    create_recv_work_request(qp, &wr_recv, &sg_entry_recv, mr_recv, buf_recv, &flow_attr_pause_recv);
+
+    for (uint64_t i = 0; i < SQ_NUM_DESC; i++)
+    {
+        create_dummy_packet(buf_send + i * ENTRY_SIZE);
+        create_send_work_request(wr_send + i, sg_entry_send + i, mr_send, buf_send + i * ENTRY_SIZE, i, DUMMY);
+        ret = ibv_post_send(qp, wr_send + i, &bad_wr_send);
+
+        if (ret < 0)
+        {
+            fprintf(stderr, "failed in post send\n");
+            exit(1);
+        }
+    }
+    sleep(2);
+
+    uint64_t wr_id = 0;
+    int msgs_completed_send ;
+    int msgs_completed_recv;
     struct timespec start, previous;
     previous.tv_sec = 0;
     previous.tv_nsec = 0;
     double time_taken = -1;
-    uint64_t rate_m = 10 * 1000;
+    uint64_t transmitted_data = 0;
     double time_diff = 0;
     double time_require = (double)DATA_PACKET_SIZE * 8.0 * 1e-9 / (SENDING_RATE_IN_GIGA / NUM_SEND_THREAD);
-    printf("time_require : %20.20f\n", time_require);
+    printf("\n Thread %d Loop Started\n", thread_id);
+    //msgs_completed_send = ibv_poll_cq(cq_send, 1, &wc);
+
     while (1)
     {
+
         clock_gettime(CLOCK_MONOTONIC, &start);
         if (time_taken >= 0)
         {
@@ -214,36 +360,38 @@ void *sending_fucntion(void *id)
             previous.tv_sec = start.tv_sec;
             previous.tv_nsec = start.tv_nsec;
         }
+        // if(msgs_completed_send == 0)
+        // {
+        //     msgs_completed_send = ibv_poll_cq(cq_send, 1, &wc);
+        // } //while (msgs_completed_send == 0);
+
         if (time_taken >= time_require || time_taken == -1)
         {
-            time_diff = time_taken - time_require;
-            //if(time_diff >= 0 ){
-            //    time_taken = time_diff;}
-            //else{
-            time_taken = 0; //}
-
-            create_data_packet(buf);
-            ret = ibv_post_send(qp, &wr, &bad_wr);
+            //Sending procedure
+            do
+            {
+                msgs_completed_send = ibv_poll_cq(cq_send, 1, &wc);
+            } while (msgs_completed_send == 0);
+            wr_id = wc.wr_id;
+            create_data_packet(buf_send + wr_id * ENTRY_SIZE);
+            create_send_work_request(wr_send + wc.wr_id, sg_entry_send + wc.wr_id, mr_send, buf_send + wr_id * ENTRY_SIZE, wr_id, DATA);
+            ret = ibv_post_send(qp, wr_send + wc.wr_id, &bad_wr_send);
             if (ret < 0)
             {
                 fprintf(stderr, "failed in post send\n");
                 exit(1);
             }
-
-            msgs_completed = ibv_poll_cq(cq, 1, &wc);
-
-            if (msgs_completed < 0)
-            {
-                printf("Polling error\n");
-                exit(1);
-            }
+            transmitted_data += DATA_PACKET_SIZE;
+            time_taken = 0;
         }
+        if (transmitted_data > TOTAL_TRANSMIT_DATA && TOTAL_TRANSMIT_DATA != -1)
+            break;
     }
+    printf("END!!!\n");
 }
 
 int main()
 {
-    //printf("\n\nSize of Seinding Packet : %ld\n\n", sizeof(packet));
     /*1. Get the list of offload capable devices */
     dev_list = ibv_get_device_list(NULL);
     if (!dev_list)
@@ -282,10 +430,13 @@ int main()
     /* 4. Create sending threads */
     pthread_t p_thread[NUM_SEND_THREAD];
     int thread_id[NUM_SEND_THREAD];
+    struct Thread_arg *thread_arg = (struct Thread_arg *)malloc(sizeof(struct Thread_arg));
+
     for (int i = 0; i < NUM_SEND_THREAD; i++)
     {
-        thread_id[i] = i;
-        pthread_create(&p_thread[i], NULL, sending_fucntion, (void *)thread_id + i * sizeof(int));
+        thread_arg->thread_id = i;
+        thread_arg->thread_action = SENDING_AND_RECEVING;
+        pthread_create(&p_thread[i], NULL, thread_fucntion, (void *)thread_arg);
     }
 
     while (1)
