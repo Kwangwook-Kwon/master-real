@@ -1346,7 +1346,7 @@ int main()
         if (time_taken >= time_require || time_taken == -1)
         {
             time_taken = 0;
-            printf("\nBandwidth : %2.5f", total_recv * 8 / (time_require * 1000 * 1000 * 1000));
+            printf("\nBandwidth : %2.5f\n", total_recv * 8 / (time_require * 1000 * 1000 * 1000));
             total_recv = 0;
         }
     }

@@ -16,7 +16,7 @@
 #define SQ_NUM_DESC 2048 /* maximum number of sends waiting for completion */
 #define RQ_NUM_DESC 2048
 #define NUM_SEND_THREAD 1
-#define SENDING_RATE_IN_GIGA 12
+#define SENDING_RATE_IN_GIGA 40
 #define DATA_PACKET_SIZE 1500
 #define TOTAL_TRANSMIT_DATA -1
 

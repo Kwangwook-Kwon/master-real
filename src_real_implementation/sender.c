@@ -356,22 +356,18 @@ void *thread_fucntion(void *thread_arg)
         if (time_taken >= 0)
         {
             time_taken += (start.tv_sec - previous.tv_sec) * 1e9;
-            time_taken += (start.tv_nsec - previous.tv_nsec + 0.5) * 1e-9; //add 0.1 nano secondes becuase CPU cannot measure per pico seconds.
+            time_taken += (start.tv_nsec - previous.tv_nsec + 0.5 ) * 1e-9; //add 0.1 nano secondes becuase CPU cannot measure per pico seconds.
             previous.tv_sec = start.tv_sec;
             previous.tv_nsec = start.tv_nsec;
         }
-        // if(msgs_completed_send == 0)
-        // {
-        //     msgs_completed_send = ibv_poll_cq(cq_send, 1, &wc);
-        // } //while (msgs_completed_send == 0);
+        if(msgs_completed_send == 0)
+        {
+             msgs_completed_send = ibv_poll_cq(cq_send, 1, &wc);
+        } //while (msgs_completed_send == 0);
 
-        if (time_taken >= time_require || time_taken == -1)
+        if ( (time_taken >= time_require || time_taken == -1) &&  msgs_completed_send > 0)
         {
             //Sending procedure
-            do
-            {
-                msgs_completed_send = ibv_poll_cq(cq_send, 1, &wc);
-            } while (msgs_completed_send == 0);
             wr_id = wc.wr_id;
             create_data_packet(buf_send + wr_id * ENTRY_SIZE);
             create_send_work_request(wr_send + wc.wr_id, sg_entry_send + wc.wr_id, mr_send, buf_send + wr_id * ENTRY_SIZE, wr_id, DATA);
@@ -382,6 +378,7 @@ void *thread_fucntion(void *thread_arg)
                 exit(1);
             }
             transmitted_data += DATA_PACKET_SIZE;
+            msgs_completed_send = 0;
             time_taken = 0;
         }
         if (transmitted_data > TOTAL_TRANSMIT_DATA && TOTAL_TRANSMIT_DATA != -1)
