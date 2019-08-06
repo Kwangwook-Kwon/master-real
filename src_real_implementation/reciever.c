@@ -1249,16 +1249,16 @@ void *revieving_function()
             struct vlan_hdr *vlan = (struct vlan_hdr *)(eth + 1);
             struct iphdr *ip = (struct iphdr *)(vlan + 1);
             struct lcchdr *lcc = (struct lcchdr *)(ip + 1);
-            if (lcc->seq - recv_seq != 1 && lcc->seq != 0x0000 ){
-                printf("Packet Loss Detected!!!!\n");
-                printf("Current SEQ :  %ld\n", lcc -> seq);
-                printf("Previous SEQ :  %ld\n", recv_seq);
-            }
+            //if (lcc->seq - recv_seq != 1 && lcc->seq != 0x0000 ){
+            //    printf("Packet Loss Detected!!!!\n");
+            //    printf("Current SEQ :  %ld\n", lcc -> seq);
+            //    printf("Previous SEQ :  %ld\n", recv_seq);
+            //}
             recv_seq = lcc->seq;
 
             sg_entry.addr = (uint64_t)buf + wc.wr_id * ENTRY_SIZE;
             wr.wr_id = wc.wr_id;
-            printf("wr_id: %d", wr.wr_id);
+            //printf("wr_id: %d", wr.wr_id);
             //memcpy(buf_send, packet, sizeof(packet));
             //ret = ibv_post_send(qp, &wr_send, &bad_wr_send);
             //if (ret < 0)
@@ -1346,7 +1346,7 @@ int main()
         if (time_taken >= time_require || time_taken == -1)
         {
             time_taken = 0;
-            printf("\nBandwidth : %2.5f\n", total_recv * 8 / (time_require * 1000 * 1000 * 1000));
+            printf("Bandwidth : %2.5f\n", total_recv * 8 / (time_require * 1000 * 1000 * 1000));
             total_recv = 0;
         }
     }

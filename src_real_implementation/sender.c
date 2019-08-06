@@ -337,7 +337,7 @@ void *thread_fucntion(void *thread_arg)
     sleep(2);
 
     uint64_t wr_id = 0;
-    int msgs_completed_send ;
+    int msgs_completed_send = 0;
     int msgs_completed_recv;
     struct timespec start, previous;
     previous.tv_sec = 0;
@@ -427,13 +427,13 @@ int main()
     /* 4. Create sending threads */
     pthread_t p_thread[NUM_SEND_THREAD];
     int thread_id[NUM_SEND_THREAD];
-    struct Thread_arg *thread_arg = (struct Thread_arg *)malloc(sizeof(struct Thread_arg));
+    struct Thread_arg *thread_arg = (struct Thread_arg *)malloc(sizeof(struct Thread_arg)*NUM_SEND_THREAD);
 
     for (int i = 0; i < NUM_SEND_THREAD; i++)
     {
-        thread_arg->thread_id = i;
-        thread_arg->thread_action = SENDING_AND_RECEVING;
-        pthread_create(&p_thread[i], NULL, thread_fucntion, (void *)thread_arg);
+        thread_arg[i].thread_id = i;
+        thread_arg[i].thread_action = SENDING_AND_RECEVING;
+        pthread_create(&p_thread[i], NULL, thread_fucntion, (void *)(thread_arg+i));
     }
 
     while (1)

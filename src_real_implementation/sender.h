@@ -15,8 +15,8 @@
 #define ENTRY_SIZE 9000  /* maximum size of each send buffer */
 #define SQ_NUM_DESC 2048 /* maximum number of sends waiting for completion */
 #define RQ_NUM_DESC 2048
-#define NUM_SEND_THREAD 1
-#define SENDING_RATE_IN_GIGA 40
+#define NUM_SEND_THREAD 5
+#define SENDING_RATE_IN_GIGA 10
 #define DATA_PACKET_SIZE 1500
 #define TOTAL_TRANSMIT_DATA -1
 
@@ -24,7 +24,7 @@
 #define DST_MAC 0x24, 0x8a, 0x07, 0xcb, 0x48, 0x08
 #define SRC_MAC 0x50, 0x6b, 0x4b, 0x11, 0x11, 0x11
 #define PAUSE_ETH_DST_ADDR 0x01, 0x80, 0xC2, 0x00, 0x00, 0x01
-
+ 
 #define VLAN_HDR 0x60, 0x09 // Priority 3show
 
 #define SRC_IP 0x0a, 0x00, 0x09, 0x03

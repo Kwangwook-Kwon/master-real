@@ -10,7 +10,7 @@
  * According to 802.3ac, the packet can be 4 bytes longer. --Klika Jan
  */
 #define VLAN_ETH_DATA_LEN 1500  /* Max. octets in payload        */
-#define VLAN_ETH_FRAME_LEN 1518 /* Max. octets in frame sans FCS */
+#define VLAN_ETH_FRAME_LEN 1518 /* Max. octets in frame sans FCS */ 
 
 /*
  *      struct vlan_hdr - vlan header
