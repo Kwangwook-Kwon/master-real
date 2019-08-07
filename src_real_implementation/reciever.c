@@ -11,1029 +11,158 @@
 #include <netinet/ip.h>
 #include <netinet/udp.h>
 #include "header.h"
-#include "sender.h"
+#include "receiver.h"
 
-#define PORT_NUM 1
-#define ENTRY_SIZE 9000  /* The maximum size of each received packet - set to jumbo frame */
-#define RQ_NUM_DESC 2048 /* The maximum receive ring length without processing */
+void create_ack_packet(void *buf, uint16_t seq)
+{
+    // Ether header
+    struct ethhdr *eth = (struct ethhdr *)buf;
+    memcpy(eth->h_dest, g_dst_mac_addr, ETH_ALEN);
+    memcpy(eth->h_source, g_src_mac_addr, ETH_ALEN);
+    eth->h_proto = htons(ETH_P_8021Q);
 
-/* The MAC we are listening to. In case your setup is via a network switch, you may need to change the MAC address to suit the network port MAC */
+    //VLAN header
+    struct vlan_hdr *vlan = (struct vlan_hdr *)(eth + 1);
+    memcpy(&vlan->h_vlan_TCI, g_vlan_hdr, 2);
+    vlan->h_vlan_encapsulated_proto = htons(ETH_P_IP);
 
-#define DEST_MAC                           \
-    {                                      \
-        0x50, 0x6b, 0x4b, 0x11, 0x11, 0x22 \
+    //IP header
+    struct iphdr *ip = (struct iphdr *)(vlan + 1);
+    size_t ip_len = ACK_PACKET_SIZE - sizeof(struct ethhdr) - sizeof(struct vlan_hdr);
+    ip->ihl = 5;
+    ip->version = 4;
+    ip->tos = 64;
+    ip->tot_len = htons((uint16_t)ip_len);
+    ip->id = 0;
+    ip->frag_off = 0;
+    ip->ttl = 64;
+    ip->protocol = IPPROTO_UDP;
+    ip->check = 0;
+    memcpy(&ip->saddr, g_src_ip, 4);
+    memcpy(&ip->daddr, g_dst_ip, 4);
+    ip->check = gen_ip_checksum((char *)ip, sizeof(struct iphdr));
+
+    //LCC Header
+    struct lcchdr *lcc = (struct lcchdr *)(ip + 1);
+    memset(lcc, 0, sizeof(struct lcchdr));
+    size_t lcc_len = ip_len - sizeof(struct iphdr);
+    lcc->source = UDP_SRC;
+    lcc->dest = UDP_DST;
+    lcc->len = htons((uint16_t)lcc_len);
+    lcc->check = 0; //Zero means no checksum check at revciever
+    lcc->ack = 1;
+    lcc->seq = seq;
+    //g_send_seq++;
+    //if (g_send_seq % 8 == 0)
+    //    lcc->ackReq = 1;
+
+    // Payload : Data150
+    //void *payload = lcc + 1;
+    //char D = 'D';
+    //memset(payload, D, lcc_len - sizeof(struct lcchdr));
+}
+
+void create_dummy_packet(void *buf)
+{
+    // Ether header
+    struct ethhdr *eth = (struct ethhdr *)buf;
+    memcpy(eth->h_dest, g_dst_mac_addr, ETH_ALEN);
+    memcpy(eth->h_source, g_src_mac_addr, ETH_ALEN);
+    eth->h_proto = htons(ETH_P_ARP);
+
+    struct arphdr *arp = (struct arphdr *)(eth + 1);
+    arp->ar_hrd = 0x0001;
+    arp->ar_pro = 0x0800;
+    arp->ar_hln = 6;
+    arp->ar_pln = 4;
+    arp->ar_op = 0x0001;
+
+    memcpy(arp->ar_sha, g_src_mac_addr, ETH_ALEN);
+    memcpy(arp->ar_sip, g_src_ip, 4);
+    memcpy(arp->ar_tha, g_brd_mac_addr, ETH_ALEN);
+    memcpy(arp->ar_tip, g_src_ip, 4);
+}
+
+void create_send_work_request(struct ibv_send_wr *wr, struct ibv_sge *sg_entry, struct ibv_mr *mr, void *buf, uint64_t wr_id, enum Packet_type packet_type)
+{
+    /* scatter/gather entry describes location and size of data to send*/
+    sg_entry->addr = (uint64_t)buf;
+    if (packet_type == DATA)
+        sg_entry->length = DATA_PACKET_SIZE;
+    else if (packet_type == DUMMY)
+        sg_entry->length = 60;
+    else if (packet_type == ACK)
+        sg_entry->length = ACK_PACKET_SIZE;
+    sg_entry->lkey = mr->lkey;
+    memset(wr, 0, sizeof(struct ibv_send_wr));
+    /*
+     * descriptor for send transaction - details:
+     * - how many pointer to data to use
+     * - if this is a single descriptor or a list (next == NULL single)
+     * - if we want inline and/or completion
+     */
+
+    wr->num_sge = 1;
+    wr->sg_list = sg_entry;
+    wr->next = NULL;
+    wr->opcode = IBV_WR_SEND;
+    wr->send_flags = IBV_SEND_SIGNALED;
+    wr->wr_id = wr_id;
+}
+
+void create_recv_work_request(struct ibv_qp *qp, struct ibv_recv_wr *wr, struct ibv_sge *sg_entry, struct ibv_mr *mr, void *buf, struct raw_eth_flow_attr *flow_attr)
+{
+    struct ibv_recv_wr *bad_wr;
+    /* pointer to packet buffer size and memory key of each packet buffer */
+    sg_entry->length = ENTRY_SIZE;
+    sg_entry->lkey = mr->lkey;
+    /*
+    * descriptor for receive transaction - details:
+    * - how many pointers to receive buffers to use
+    * - if this is a single descriptor or a list (next == NULL single)
+    */
+
+    wr->num_sge = 1;
+    wr->sg_list = sg_entry;
+    wr->next = NULL;
+    for (int n = 0; n < RQ_NUM_DESC; n++)
+    {
+        /* each descriptor points to max MTU size buffer */
+        sg_entry->addr = (uint64_t)buf + ENTRY_SIZE * n;
+
+        /* index of descriptor returned when packet arrives */
+        wr->wr_id = n;
+
+        ibv_post_recv(qp, wr, &bad_wr);
     }
+}
 
-#define SRC_MAC 0x50, 0x6b, 0x4b, 0x11, 0x11, 0x22
-#define DST_MAC 0x24, 0x8a, 0x07, 0xcb, 0x48, 0x08
-#define ETH_TYPE_VLAN 0x81, 0x00
-#define VLAN_HDR 0x60, 0x09
-#define ETH_TYPE 0x08, 0x00
-#define IP_HDRS 0x45, 0x00, 0x03, 0xe6, 0x00, 0x00, 0x40, 0x00, 0x40, 0x11, 0x10, 0x02
-#define DST_IP 0x0a, 0x00, 0x09, 0x03
-#define SRC_IP 0x0a, 0x00, 0x0a, 0x03
-#define UDP_HDR 0x4a, 0x48, 0x04, 0xd4, 0x03, 0xd2, 0xff, 0xa5
-#define IP_OPT 0x08, 0x00, 0x49, 0xa4, 0x88
-#define ICMP_HDR 0x2c, 0x00, 0x09
-char packet[] = {
-    DST_MAC,
-    SRC_MAC,
-    ETH_TYPE_VLAN,
-    VLAN_HDR,
-    ETH_TYPE,
-    IP_HDRS,
-    SRC_IP,
-    DST_IP,
-    UDP_HDR,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-    0x38,
-};
+static uint16_t gen_ip_checksum(const char *buf, int num_bytes)
+{
+    const uint16_t *half_words = (const uint16_t *)buf;
+    unsigned sum = 0;
+    for (int i = 0; i < num_bytes / 2; i++)
+        sum += half_words[i];
 
-struct ibv_device **dev_list;
-struct ibv_device *ib_dev;
-struct ibv_context *context;
-struct ibv_pd *pd;
+    if (num_bytes & 1)
+        sum += buf[num_bytes - 1];
 
-uint64_t total_recv;
-u_int16_t recv_seq = 0;
+    sum = (sum & 0xffff) + (sum >> 16);
+    sum += (sum & 0xff0000) >> 16;
+    sum = ~sum & 0xffff;
 
-void *revieving_function()
+    return sum;
+}
+
+void *ack_thread_function()
 {
     int ret;
     /* 4. Create Complition Queue (CQ) */
-    struct ibv_cq *cq, *cq_send;
-    cq = ibv_create_cq(context, RQ_NUM_DESC, NULL, NULL, 0);
+    struct ibv_cq *cq_recv, *cq_send;
+    cq_recv = ibv_create_cq(context, RQ_NUM_DESC, NULL, NULL, 0);
     cq_send = ibv_create_cq(context, SQ_NUM_DESC, NULL, NULL, 0);
 
-    if (!cq)
+    if (!cq_recv || !cq_send)
     {
         fprintf(stderr, "Couldn't create CQ %d\n", errno);
         exit(1);
@@ -1046,7 +175,7 @@ void *revieving_function()
 
         /* report receive completion to cq */
         .send_cq = cq_send,
-        .recv_cq = cq,
+        .recv_cq = cq_recv,
         .cap = {
             /* no send ring */
             .max_send_wr = SQ_NUM_DESC,
@@ -1106,65 +235,67 @@ void *revieving_function()
     }
 
     /* 9. Allocate Memory */
-    int buf_size = ENTRY_SIZE * RQ_NUM_DESC; /* maximum size of data to be accessed by hardware */
-    void *buf, *buf_send;
-    buf = malloc(buf_size);
-    buf_send = malloc(buf_size);
-    if (!buf || !buf_send)
+    buf_size_recv = ENTRY_SIZE * RQ_NUM_DESC;
+    buf_size_recv = ENTRY_SIZE * SQ_NUM_DESC; /* maximum size of data to be accessed by hardware */
+    void *buf_recv, *buf_send;
+    buf_recv = malloc(buf_size_recv);
+    buf_send = malloc(buf_size_send);
+    if (!buf_recv || !buf_send)
     {
         fprintf(stderr, "Coudln't allocate memory\n");
         exit(1);
     }
 
     /* 10. Register the user memory so it can be accessed by the HW directly */
-    struct ibv_mr *mr, *mr_send;
-    mr = ibv_reg_mr(pd, buf, buf_size, IBV_ACCESS_LOCAL_WRITE);
-    mr_send = ibv_reg_mr(pd, buf_send, buf_size, IBV_ACCESS_LOCAL_WRITE);
-    if (!mr) //|| !mr_send)
+    struct ibv_mr *mr_recv, *mr_send;
+    mr_recv = ibv_reg_mr(pd, buf_recv, buf_size_recv, IBV_ACCESS_LOCAL_WRITE);
+    mr_send = ibv_reg_mr(pd, buf_send, buf_size_send, IBV_ACCESS_LOCAL_WRITE);
+    if (!mr_recv || !mr_send)
     {
         fprintf(stderr, "Couldn't register mr\n");
         exit(1);
     }
 
     /* 11. Attach all buffers to the ring */
-    memcpy(buf_send, packet, sizeof(packet));
 
-    int n;
-    struct ibv_sge sg_entry, sg_entry_send;
-    struct ibv_recv_wr wr, *bad_wr;
-    struct ibv_send_wr wr_send, *bad_wr_send;
+    struct ibv_sge sg_entry_recv[RQ_NUM_DESC], sg_entry_send[SQ_NUM_DESC];
+    struct ibv_recv_wr wr_recv[RQ_NUM_DESC], *bad_wr_recv;
+    struct ibv_send_wr wr_send[SQ_NUM_DESC], *bad_wr_send;
 
-    sg_entry_send.addr = (uint64_t)buf_send;
-    sg_entry_send.length = sizeof(packet);
-    sg_entry_send.lkey = mr_send->lkey;
-    memset(&wr_send, 0, sizeof(wr_send));
-    wr_send.num_sge = 1;
-    wr_send.sg_list = &sg_entry_send;
-    wr_send.next = NULL;
-    wr_send.opcode = IBV_WR_SEND;
-    wr_send.send_flags = IBV_SEND_SIGNALED;
+    for (uint64_t i = 0; i < SQ_NUM_DESC; i++)
+    {
+        create_dummy_packet(buf_send + i * ENTRY_SIZE);
+        create_send_work_request(wr_send + i, sg_entry_send + i, mr_send, buf_send + i * ENTRY_SIZE, i, DUMMY);
+        ret = ibv_post_send(qp, wr_send + i, &bad_wr_send);
 
-    /* pointer to packet buffer size and memory key of each packet buffer */
-    sg_entry.length = ENTRY_SIZE;
-    sg_entry.lkey = mr->lkey;
+        if (ret < 0)
+        {
+            fprintf(stderr, "failed in post send\n");
+            exit(1);
+        }
+    }
+
     /*
     * descriptor for receive transaction - details:
     * - how many pointers to receive buffers to use
     * - if this is a single descriptor or a list (next == NULL single)
     */
 
-    wr.num_sge = 1;
-    wr.sg_list = &sg_entry;
-    wr.next = NULL;
-    for (n = 0; n < RQ_NUM_DESC; n++)
+    for (int n = 0; n < RQ_NUM_DESC; n++)
     {
+        wr_recv[n].num_sge = 1;
+        wr_recv[n].sg_list = &sg_entry_recv[n];
+        wr_recv[n].next = NULL;
+        /* pointer to packet buffer size and memory key of each packet buffer */
+        sg_entry_recv[n].length = ENTRY_SIZE;
+        sg_entry_recv[n].lkey = mr_recv->lkey;
         /* each descriptor points to max MTU size buffer */
-        sg_entry.addr = (uint64_t)buf + ENTRY_SIZE * n;
+        sg_entry_recv[n].addr = (uint64_t)buf_recv + ENTRY_SIZE * n;
 
         /* index of descriptor returned when packet arrives */
-        wr.wr_id = n;
+        wr_recv[n].wr_id = n;
 
-        ibv_post_recv(qp, &wr, &bad_wr);
+        ibv_post_recv(qp, &wr_recv[n], &bad_wr_recv);
     }
 
     /* 12. Register steering rule to intercept packet to DEST_MAC and place packet in ring pointed by ->qp */
@@ -1184,7 +315,7 @@ void *revieving_function()
             .flags = 0,
         },
         .spec_eth = {.type = IBV_EXP_FLOW_SPEC_ETH, .size = sizeof(struct ibv_flow_spec_eth), .val = {
-                                                                                                  .dst_mac = DEST_MAC,
+                                                                                                  .dst_mac = DST_MAC_RECV,
                                                                                                   .src_mac = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
                                                                                                   .ether_type = 0,
                                                                                                   .vlan_tag = 0,
@@ -1195,17 +326,6 @@ void *revieving_function()
                          .ether_type = 0,
                          .vlan_tag = 0,
                      }},
-        /*.spec_ipv4 = {
-            .type = IBV_FLOW_SPEC_IPV4, 
-            .size = sizeof(struct ibv_flow_spec_ipv4),
-            .val = {
-                .src_ip = 0,
-                .dst_ip = 0x0A000A03,
-            },
-        .mask = {
-            .src_ip = 0,
-            .dst_ip = 0xFFFFFFFF,
-        }*/
     };
 
     /* 13. Create steering rule */
@@ -1218,15 +338,227 @@ void *revieving_function()
     }
 
     /* 14. Wait for CQ event upon message received, and print a message */
-    int msgs_completed;
-    struct ibv_wc wc;
+    int msgs_completed_recv, msgs_completed_send;
+    int wr_id;
+    struct ibv_wc wc_recv, wc_send;
+    unsigned char *output;
+    uint16_t seq;
+    while (1)
+    {
+        if (ack_queue_head != ack_queue_tail)
+        {
+            seq = ack_queue[ack_queue_head];
+            ack_queue_head = (ack_queue_head + 1) % ACK_QUEUE_LENGTH;
+            do
+            {
+                msgs_completed_send = ibv_poll_cq(cq_send, 1, &wc_send);
+            } while (msgs_completed_send == 0);
+            create_ack_packet(buf_send + wc_send.wr_id * ENTRY_SIZE, seq);
+            create_send_work_request(wr_send + wc_send.wr_id, sg_entry_send + wc_send.wr_id, mr_send, buf_send + wc_send.wr_id * ENTRY_SIZE, wc_send.wr_id, ACK);
+            ret = ibv_post_send(qp, wr_send + wc_send.wr_id, &bad_wr_send);
+            if (ret < 0)
+            {
+                fprintf(stderr, "failed in post send\n");
+                exit(1);
+            }
+        }
+    }
+}
+
+void *recv_thread_function(void *thread_arg)
+{
+    int ret;
+    /* 4. Create Complition Queue (CQ) */
+    struct ibv_cq *cq_recv, *cq_send;
+    cq_recv = ibv_create_cq(context, RQ_NUM_DESC, NULL, NULL, 0);
+    cq_send = ibv_create_cq(context, SQ_NUM_DESC, NULL, NULL, 0);
+
+    if (!cq_recv || !cq_send)
+    {
+        fprintf(stderr, "Couldn't create CQ %d\n", errno);
+        exit(1);
+    }
+
+    /* 5. Initialize QP */
+    struct ibv_qp *qp;
+    struct ibv_qp_init_attr qp_init_attr = {
+        .qp_context = NULL,
+
+        /* report receive completion to cq */
+        .send_cq = cq_send,
+        .recv_cq = cq_recv,
+        .cap = {
+            /* no send ring */
+            .max_send_wr = SQ_NUM_DESC,
+            /* maximum number of packets in ring */
+            .max_recv_wr = RQ_NUM_DESC,
+            /* only one pointer per descriptor */
+            .max_recv_sge = 1,
+            .max_send_sge = 1,
+        },
+
+        .qp_type = IBV_QPT_RAW_PACKET,
+
+    };
+
+    /* 6. Create Queue Pair (QP) - Receive Ring */
+    qp = ibv_create_qp(pd, &qp_init_attr);
+    if (!qp)
+    {
+        fprintf(stderr, "Couldn't create RSS QP\n");
+        exit(1);
+    }
+
+    /* 7. Initialize the QP (receive ring) and assign a port */
+    struct ibv_qp_attr qp_attr;
+    int qp_flags;
+    memset(&qp_attr, 0, sizeof(qp_attr));
+    qp_flags = IBV_QP_STATE | IBV_QP_PORT;
+    qp_attr.qp_state = IBV_QPS_INIT;
+    qp_attr.port_num = 1;
+    ret = ibv_modify_qp(qp, &qp_attr, qp_flags);
+    if (ret < 0)
+    {
+        fprintf(stderr, "failed modify qp to init\n");
+        exit(1);
+    }
+    memset(&qp_attr, 0, sizeof(qp_attr));
+
+    /* 8. Move ring state to ready to receive, this is needed in order to be able to receive packets */
+    qp_flags = IBV_QP_STATE;
+    qp_attr.qp_state = IBV_QPS_RTR;
+    ret = ibv_modify_qp(qp, &qp_attr, qp_flags);
+    if (ret < 0)
+    {
+        fprintf(stderr, "failed modify qp to receive\n");
+        exit(1);
+    }
+
+    /* b. Move the ring to ready to send */
+
+    qp_flags = IBV_QP_STATE;
+    qp_attr.qp_state = IBV_QPS_RTS;
+    ret = ibv_modify_qp(qp, &qp_attr, qp_flags);
+    if (ret < 0)
+    {
+        fprintf(stderr, "failed modify qp to receive\n");
+        exit(1);
+    }
+
+    /* 9. Allocate Memory */
+    buf_size_recv = ENTRY_SIZE * RQ_NUM_DESC;
+    buf_size_recv = ENTRY_SIZE * SQ_NUM_DESC; /* maximum size of data to be accessed by hardware */
+    void *buf_recv, *buf_send;
+    buf_recv = malloc(buf_size_recv);
+    buf_send = malloc(buf_size_send);
+    if (!buf_recv || !buf_send)
+    {
+        fprintf(stderr, "Coudln't allocate memory\n");
+        exit(1);
+    }
+
+    /* 10. Register the user memory so it can be accessed by the HW directly */
+    struct ibv_mr *mr_recv, *mr_send;
+    mr_recv = ibv_reg_mr(pd, buf_recv, buf_size_recv, IBV_ACCESS_LOCAL_WRITE);
+    mr_send = ibv_reg_mr(pd, buf_send, buf_size_send, IBV_ACCESS_LOCAL_WRITE);
+    if (!mr_recv || !mr_send)
+    {
+        fprintf(stderr, "Couldn't register mr\n");
+        exit(1);
+    }
+
+    /* 11. Attach all buffers to the ring */
+
+    struct ibv_sge sg_entry_recv[RQ_NUM_DESC], sg_entry_send[SQ_NUM_DESC];
+    struct ibv_recv_wr wr_recv[RQ_NUM_DESC], *bad_wr_recv;
+    struct ibv_send_wr wr_send[SQ_NUM_DESC], *bad_wr_send;
+
+    for (uint64_t i = 0; i < SQ_NUM_DESC; i++)
+    {
+        create_dummy_packet(buf_send + i * ENTRY_SIZE);
+        create_send_work_request(wr_send + i, sg_entry_send + i, mr_send, buf_send + i * ENTRY_SIZE, i, DUMMY);
+        ret = ibv_post_send(qp, wr_send + i, &bad_wr_send);
+
+        if (ret < 0)
+        {
+            fprintf(stderr, "failed in post send\n");
+            exit(1);
+        }
+    }
+
+    /*
+    * descriptor for receive transaction - details:
+    * - how many pointers to receive buffers to use
+    * - if this is a single descriptor or a list (next == NULL single)
+    */
+
+    for (int n = 0; n < RQ_NUM_DESC; n++)
+    {
+        wr_recv[n].num_sge = 1;
+        wr_recv[n].sg_list = &sg_entry_recv[n];
+        wr_recv[n].next = NULL;
+        /* pointer to packet buffer size and memory key of each packet buffer */
+        sg_entry_recv[n].length = ENTRY_SIZE;
+        sg_entry_recv[n].lkey = mr_recv->lkey;
+        /* each descriptor points to max MTU size buffer */
+        sg_entry_recv[n].addr = (uint64_t)buf_recv + ENTRY_SIZE * n;
+
+        /* index of descriptor returned when packet arrives */
+        wr_recv[n].wr_id = n;
+
+        ibv_post_recv(qp, &wr_recv[n], &bad_wr_recv);
+    }
+
+    /* 12. Register steering rule to intercept packet to DEST_MAC and place packet in ring pointed by ->qp */
+    struct raw_eth_flow_attr
+    {
+        struct ibv_flow_attr attr;
+        struct ibv_flow_spec_eth spec_eth;
+        //struct ibv_flow_spec_ipv4 spec_ipv4;
+    } __attribute__((packed)) flow_attr = {
+        .attr = {
+            .comp_mask = 0,
+            .type = IBV_FLOW_ATTR_NORMAL,
+            .size = sizeof(flow_attr),
+            .priority = 0,
+            .num_of_specs = 1,
+            .port = PORT_NUM,
+            .flags = 0,
+        },
+        .spec_eth = {.type = IBV_EXP_FLOW_SPEC_ETH, .size = sizeof(struct ibv_flow_spec_eth), .val = {
+                                                                                                  .dst_mac = DST_MAC_RECV,
+                                                                                                  .src_mac = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+                                                                                                  .ether_type = 0,
+                                                                                                  .vlan_tag = 0,
+                                                                                              },
+                     .mask = {
+                         .dst_mac = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF},
+                         .src_mac = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+                         .ether_type = 0,
+                         .vlan_tag = 0,
+                     }},
+    };
+
+    /* 13. Create steering rule */
+    struct ibv_flow *eth_flow;
+    eth_flow = ibv_create_flow(qp, &flow_attr.attr);
+    if (!eth_flow)
+    {
+        fprintf(stderr, "Couldn't attach steering flow\n");
+        exit(1);
+    }
+
+    /* 14. Wait for CQ event upon message received, and print a message */
+    int msgs_completed_recv, msgs_completed_send;
+    int wr_id;
+    struct ibv_wc wc_recv, wc_send;
     unsigned char *output;
     while (1)
     {
 
         /* wait for completion */
-        msgs_completed = ibv_poll_cq(cq, 1, &wc);
-        if (msgs_completed > 0)
+        msgs_completed_recv = ibv_poll_cq(cq_recv, 1, &wc_recv);
+        if (msgs_completed_recv > 0)
         {
             /*
              * completion includes: 
@@ -1234,30 +566,45 @@ void *revieving_function()
              * -index of descriptor completing
              * -size of the incoming packets
              */
-            total_recv += wc.byte_len;
-            //printf("\n\n");
-            //printf("message %ld received size %d\n", wc.wr_id, wc.byte_len);
-            //output = (char *)buf + wc.wr_id * ENTRY_SIZE;
-            //for (int i = 0; i < wc.byte_len; i++)
-            //{
-            //    printf("%02X ", output[i]);
-            //    if (i % 16 == 0 && i != 0)
-            //        printf("\n");
-            //}
-            //printf("\n\n\n");
-            struct ethhdr *eth = (struct ethhdr *)(  (char *)buf + wc.wr_id * ENTRY_SIZE);
+            g_total_recv += wc_recv.byte_len;
+
+            struct ethhdr *eth = (struct ethhdr *)((char *)buf_recv + wc_recv.wr_id * ENTRY_SIZE);
             struct vlan_hdr *vlan = (struct vlan_hdr *)(eth + 1);
             struct iphdr *ip = (struct iphdr *)(vlan + 1);
             struct lcchdr *lcc = (struct lcchdr *)(ip + 1);
-            //if (lcc->seq - recv_seq != 1 && lcc->seq != 0x0000 ){
-            //    printf("Packet Loss Detected!!!!\n");
-            //    printf("Current SEQ :  %ld\n", lcc -> seq);
-            //    printf("Previous SEQ :  %ld\n", recv_seq);
-            //}
-            recv_seq = lcc->seq;
 
-            sg_entry.addr = (uint64_t)buf + wc.wr_id * ENTRY_SIZE;
-            wr.wr_id = wc.wr_id;
+            //If ack request is tagged
+            if (lcc->ackReq == 1)
+            {
+                //pthread_mutex_lock(&mutex_ack_queue);
+                //Push to ack queue
+                if ((ack_queue_tail + 1) % ACK_QUEUE_LENGTH == ack_queue_head)
+                {
+                    printf("ERROR: ACK queue is full!!\n");
+                    exit(1);
+                }
+
+                ack_queue[ack_queue_tail] = lcc->seq;
+                ack_queue_tail = (ack_queue_tail + 1) % ACK_QUEUE_LENGTH;
+                //pthread_mutex_unlock(&mutex_ack_queue);
+            }
+
+            if (lcc->seq - g_recv_seq != 1 && g_recv_seq - lcc->seq != 65535)
+            {
+                printf("Packet Loss Detected!!!!\n");
+                printf("Current SEQ :  %d\n", lcc->seq);
+                printf("Previous SEQ :  %d\n", g_recv_seq);
+                g_seq_revert++;
+                if (g_seq_revert > 100)
+                {
+                    printf("\nERROR: Too many packet loss over 100!!!\n");
+                    exit(1);
+                }
+            }
+            g_recv_seq = lcc->seq;
+
+            //sg_entry.addr = (uint64_t)buf + wc.wr_id * ENTRY_SIZE;
+            //wr.wr_id = wc.wr_id;
             //printf("wr_id: %d", wr.wr_id);
             //memcpy(buf_send, packet, sizeof(packet));
             //ret = ibv_post_send(qp, &wr_send, &bad_wr_send);
@@ -1269,9 +616,9 @@ void *revieving_function()
             //msgs_completed = ibv_poll_cq(cq_send, 1, &wc);
             /* after processed need to post back buffer */
 
-            ibv_post_recv(qp, &wr, &bad_wr);
+            ibv_post_recv(qp, &wr_recv[wc_recv.wr_id], &bad_wr_recv);
         }
-        else if (msgs_completed < 0)
+        else if (msgs_completed_recv < 0)
         {
             printf("Polling error\n");
             exit(1);
@@ -1319,15 +666,20 @@ int main()
         exit(1);
     }
 
+    pthread_t ack_tread;
+    pthread_create(&ack_tread, NULL, ack_thread_function, NULL);
+
     /* 4. Create sending threads */
     pthread_t p_thread[1];
     int thread_id[1];
+    struct Thread_arg *thread_arg = (struct Thread_arg *)malloc(sizeof(struct Thread_arg) * NUM_SEND_THREAD);
+
     for (int i = 0; i < 1; i++)
     {
-        thread_id[i] = i;
-        pthread_create(&p_thread[i], NULL, revieving_function, NULL);
+        thread_arg[i].thread_id = i;
+        thread_arg[i].thread_action = SENDING_AND_RECEVING;
+        pthread_create(&p_thread[i], NULL, recv_thread_function, (void *)(thread_arg + i));
     }
-    total_recv = 0;
     double time_require = 0.050;
     struct timespec start, previous;
     previous.tv_sec = 0;
@@ -1339,15 +691,15 @@ int main()
         if (time_taken >= 0)
         {
             time_taken += (start.tv_sec - previous.tv_sec) * 1e9;
-            time_taken += (start.tv_nsec - previous.tv_nsec) * 1e-9; //add 0.1 nano secondes becuase CPU cannot measure per pico seconds.
+            time_taken += (start.tv_nsec - previous.tv_nsec) * 1e-9;
             previous.tv_sec = start.tv_sec;
             previous.tv_nsec = start.tv_nsec;
         }
         if (time_taken >= time_require || time_taken == -1)
         {
             time_taken = 0;
-            printf("Bandwidth : %2.5f\n", total_recv * 8 / (time_require * 1000 * 1000 * 1000));
-            total_recv = 0;
+            //printf("Bandwidth : %2.5f\n", g_total_recv * 8 / (time_require * 1000 * 1000 * 1000));
+            g_total_recv = 0;
         }
     }
 

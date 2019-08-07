@@ -53,6 +53,8 @@ void create_data_packet(void *buf)
     lcc->data = 1;
     lcc->seq = g_send_seq;
     g_send_seq++;
+    if (g_send_seq % 8 == 0)
+        lcc->ackReq = 1;
 
     // Payload : Data150
     void *payload = lcc + 1;
@@ -85,10 +87,10 @@ void create_send_work_request(struct ibv_send_wr *wr, struct ibv_sge *sg_entry, 
 {
     /* scatter/gather entry describes location and size of data to send*/
     sg_entry->addr = (uint64_t)buf;
-    //if(packet_type == DATA)
-    sg_entry->length = DATA_PACKET_SIZE;
-    //else if(packet_type == DUMMY)
-    //    sg_entry->length = 10;
+    if (packet_type == DATA)
+        sg_entry->length = DATA_PACKET_SIZE;
+    else if (packet_type == DUMMY)
+        sg_entry->length = 60;
     sg_entry->lkey = mr->lkey;
     memset(wr, 0, sizeof(struct ibv_send_wr));
     /*
@@ -131,29 +133,6 @@ void create_recv_work_request(struct ibv_qp *qp, struct ibv_recv_wr *wr, struct 
 
         ibv_post_recv(qp, wr, &bad_wr);
     }
-
-    /* Register steering rule to intercept packet to DEST_MAC and place packet in ring pointed by ->qp */
-
-    /*flow_attr->attr.comp_mask = 0;
-    flow_attr->attr.type = IBV_FLOW_ATTR_NORMAL;
-    flow_attr->attr.size = sizeof(struct ibv_flow_attr);
-    flow_attr->attr.priority = 0;
-    flow_attr->attr.num_of_specs = 1;
-    flow_attr->attr.port = PORT_NUM;
-    flow_attr->attr.flags = 0;
-
-    flow_attr->spec_eth.type = IBV_EXP_FLOW_SPEC_ETH;
-    flow_attr->spec_eth.size = sizeof(struct ibv_flow_spec_eth);
-    memcpy(&flow_attr->spec_eth.val.dst_mac, g_eth_pause_addr, ETH_ALEN);
-    memset(&flow_attr->spec_eth.val.src_mac, 0, ETH_ALEN);
-    flow_attr->spec_eth.val.ether_type = ETH_P_PAUSE;
-    flow_attr->spec_eth.val.vlan_tag = 0;
-
-    memset(&flow_attr->spec_eth.mask.dst_mac, 0xFF, ETH_ALEN);
-    memset(&flow_attr->spec_eth.mask.src_mac, 0x00, ETH_ALEN);
-
-    flow_attr->spec_eth.mask.ether_type = 0;
-    flow_attr->spec_eth.mask.vlan_tag = 0;*/
 }
 
 static uint16_t gen_ip_checksum(const char *buf, int num_bytes)
@@ -173,7 +152,20 @@ static uint16_t gen_ip_checksum(const char *buf, int num_bytes)
     return sum;
 }
 
-void *thread_fucntion(void *thread_arg)
+void *clock_thread_function()
+{
+    struct timespec time;
+    time.tv_sec = 0;
+    time.tv_nsec = 0;
+
+    while (1)
+    {
+        clock_gettime(CLOCK_MONOTONIC, &time);
+        g_time = time.tv_nsec;
+    }
+}
+
+void *send_thread_fucntion(void *thread_arg)
 {
     struct Thread_arg *args = (struct Thread_arg *)thread_arg;
     int thread_id = args->thread_id;
@@ -257,8 +249,8 @@ void *thread_fucntion(void *thread_arg)
     /* 9. Allocate Memory for send packet */
     void *buf_send; //sending buffer address
     void *buf_recv; //recving buffer address
-    buf_send = malloc(buf_size);
-    buf_recv = malloc(buf_size);
+    buf_send = malloc(buf_size_send);
+    buf_recv = malloc(buf_size_recv);
     if (!buf_send || !buf_recv)
     {
         fprintf(stderr, "Coudln't allocate memory\n");
@@ -268,8 +260,8 @@ void *thread_fucntion(void *thread_arg)
     /* 10. Register the user memory so it can be accessed by the HW directly */
     struct ibv_mr *mr_send;
     struct ibv_mr *mr_recv;
-    mr_send = ibv_reg_mr(pd, buf_send, buf_size, IBV_ACCESS_LOCAL_WRITE);
-    mr_recv = ibv_reg_mr(pd, buf_recv, buf_size, IBV_ACCESS_LOCAL_WRITE);
+    mr_send = ibv_reg_mr(pd, buf_send, buf_size_send, IBV_ACCESS_LOCAL_WRITE);
+    mr_recv = ibv_reg_mr(pd, buf_recv, buf_size_recv, IBV_ACCESS_LOCAL_WRITE);
     if (!mr_send || !mr_recv)
     {
         fprintf(stderr, "Couldn't register mr\n");
@@ -334,54 +326,59 @@ void *thread_fucntion(void *thread_arg)
             exit(1);
         }
     }
-    sleep(2);
 
     uint64_t wr_id = 0;
     int msgs_completed_send = 0;
     int msgs_completed_recv;
-    struct timespec start, previous;
-    previous.tv_sec = 0;
-    previous.tv_nsec = 0;
-    double time_taken = -1;
-    uint64_t transmitted_data = 0;
+    long time_taken = 0;
+    long time_start, time_prev;
     double time_diff = 0;
-    double time_require = (double)DATA_PACKET_SIZE * 8.0 * 1e-9 / (SENDING_RATE_IN_GIGA / NUM_SEND_THREAD);
+    long time_require = (double)DATA_PACKET_SIZE * 8.0 / (SENDING_RATE_IN_GIGA / NUM_SEND_THREAD);
     printf("\n Thread %d Loop Started\n", thread_id);
-    //msgs_completed_send = ibv_poll_cq(cq_send, 1, &wc);
-
+    printf("\ntime taken: %ld\n", time_require);
+    msgs_completed_send = ibv_poll_cq(cq_send, 1, &wc);
+    //time_prev = g_time;
+    struct timespec curr, prev;
+    clock_gettime(CLOCK_MONOTONIC, &prev);
     while (1)
     {
+        clock_gettime(CLOCK_MONOTONIC, &curr);
+        if (curr.tv_nsec >= prev.tv_nsec)
+            time_taken += curr.tv_nsec - prev.tv_nsec;
+        else
+            time_taken += curr.tv_nsec + 1e9- prev.tv_nsec;
+        prev.tv_nsec =curr.tv_nsec;
 
-        clock_gettime(CLOCK_MONOTONIC, &start);
-        if (time_taken >= 0)
-        {
-            time_taken += (start.tv_sec - previous.tv_sec) * 1e9;
-            time_taken += (start.tv_nsec - previous.tv_nsec + 0.5 ) * 1e-9; //add 0.1 nano secondes becuase CPU cannot measure per pico seconds.
-            previous.tv_sec = start.tv_sec;
-            previous.tv_nsec = start.tv_nsec;
-        }
-        if(msgs_completed_send == 0)
-        {
-             msgs_completed_send = ibv_poll_cq(cq_send, 1, &wc);
-        } //while (msgs_completed_send == 0);
-
-        if ( (time_taken >= time_require || time_taken == -1) &&  msgs_completed_send > 0)
+        //time_start = g_time;
+        //if (time_start >= time_prev)
+        //    time_taken += (time_start - time_prev);
+        // else
+        //    time_taken += (time_start + 1 * 1e9 - time_prev);
+        //time_prev = time_start;
+        if (time_taken >= time_require && msgs_completed_send > 0)
         {
             //Sending procedure
             wr_id = wc.wr_id;
             create_data_packet(buf_send + wr_id * ENTRY_SIZE);
             create_send_work_request(wr_send + wc.wr_id, sg_entry_send + wc.wr_id, mr_send, buf_send + wr_id * ENTRY_SIZE, wr_id, DATA);
             ret = ibv_post_send(qp, wr_send + wc.wr_id, &bad_wr_send);
+
             if (ret < 0)
             {
                 fprintf(stderr, "failed in post send\n");
                 exit(1);
             }
-            transmitted_data += DATA_PACKET_SIZE;
+            g_total_send += DATA_PACKET_SIZE;
             msgs_completed_send = 0;
-            time_taken = 0;
+            time_taken -= time_require;
         }
-        if (transmitted_data > TOTAL_TRANSMIT_DATA && TOTAL_TRANSMIT_DATA != -1)
+
+        if (msgs_completed_send == 0)
+        {
+            msgs_completed_send = ibv_poll_cq(cq_send, 1, &wc);
+        }
+
+        if (g_total_send > TOTAL_TRANSMIT_DATA && TOTAL_TRANSMIT_DATA != -1)
             break;
     }
     printf("END!!!\n");
@@ -425,15 +422,18 @@ int main()
     }
 
     /* 4. Create sending threads */
+    pthread_t clock_tread;
+    pthread_create(&clock_tread, NULL, clock_thread_function, NULL);
+
     pthread_t p_thread[NUM_SEND_THREAD];
     int thread_id[NUM_SEND_THREAD];
-    struct Thread_arg *thread_arg = (struct Thread_arg *)malloc(sizeof(struct Thread_arg)*NUM_SEND_THREAD);
+    struct Thread_arg *thread_arg = (struct Thread_arg *)malloc(sizeof(struct Thread_arg) * NUM_SEND_THREAD);
 
     for (int i = 0; i < NUM_SEND_THREAD; i++)
     {
         thread_arg[i].thread_id = i;
         thread_arg[i].thread_action = SENDING_AND_RECEVING;
-        pthread_create(&p_thread[i], NULL, thread_fucntion, (void *)(thread_arg+i));
+        pthread_create(&p_thread[i], NULL, send_thread_fucntion, (void *)(thread_arg + i));
     }
 
     while (1)
