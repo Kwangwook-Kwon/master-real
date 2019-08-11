@@ -46,29 +46,56 @@ struct lcchdr
         __extension__ union {
                 struct
                 {
-                        u_int16_t lcc_sport; /* source port */
-                        u_int16_t lcc_dport; /* destination port */
-                        u_int16_t lcc_ulen;  /* length */
-                        u_int16_t lcc_sum;   /* checksum */
+                        uint16_t lcc_sport; /* source port */
+                        uint16_t lcc_dport; /* destination port */
+                        uint16_t lcc_ulen;  /* length */
+                        uint16_t lcc_sum;   /* checksum */
                 };
                 struct
                 {
-                        u_int16_t source;
-                        u_int16_t dest;
-                        u_int16_t len;
-                        u_int16_t check;
+                        uint16_t source;
+                        uint16_t dest;
+                        uint16_t len;
+                        uint16_t check;
                 };
         };
-        u_int16_t ackReq : 1, /* is ACK request? */
+        uint16_t ackReq : 1, /* is ACK request? */
             ack : 1,          /* is ACK? */
             data : 1,         /* is DATA? */
             reserve : 13;
-        u_int16_t seq;
+        uint32_t seq;
+};
+
+
+struct lcchdr_ack
+{
+        __extension__ union {
+                struct
+                {
+                        uint16_t lcc_sport; /* source port */
+                        uint16_t lcc_dport; /* destination port */
+                        uint16_t lcc_ulen;  /* length */
+                        uint16_t lcc_sum;   /* checksum */
+                };
+                struct
+                {
+                        uint16_t source;
+                        uint16_t dest;
+                        uint16_t len;
+                        uint16_t check;
+                };
+        };
+        uint16_t ackReq : 1, /* is ACK request? */
+            ack : 1,          /* is ACK? */
+            data : 1,         /* is DATA? */
+            reserve : 13;
+        uint32_t seq;
+        uint32_t ack_time;
 };
 
 struct puase
 {
         struct ethhdr eth;
-        u_int16_t type;
-        u_int16_t duration;
+        uint16_t type;
+        uint16_t duration;
 };

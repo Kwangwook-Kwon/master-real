@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #include <infiniband/verbs.h>
 #include <infiniband/verbs_exp.h>
 #include <stdio.h>
@@ -13,8 +14,14 @@
 #include "header.h"
 #include "receiver.h"
 
-void create_ack_packet(void *buf, uint16_t seq)
+void create_ack_packet(void *buf, uint32_t seq, uint32_t ack_time)
 {
+
+    unsigned long mask = 1024;
+    if (pthread_setaffinity_np(pthread_self(), sizeof(mask), (cpu_set_t *)&mask))
+    {
+        fprintf(stderr, "Couldn't allocate thread cpu \n");
+    }
     // Ether header
     struct ethhdr *eth = (struct ethhdr *)buf;
     memcpy(eth->h_dest, g_dst_mac_addr, ETH_ALEN);
@@ -43,8 +50,8 @@ void create_ack_packet(void *buf, uint16_t seq)
     ip->check = gen_ip_checksum((char *)ip, sizeof(struct iphdr));
 
     //LCC Header
-    struct lcchdr *lcc = (struct lcchdr *)(ip + 1);
-    memset(lcc, 0, sizeof(struct lcchdr));
+    struct lcchdr_ack *lcc = (struct lcchdr_ack *)(ip + 1);
+    memset(lcc, 0, sizeof(struct lcchdr_ack));
     size_t lcc_len = ip_len - sizeof(struct iphdr);
     lcc->source = UDP_SRC;
     lcc->dest = UDP_DST;
@@ -52,6 +59,7 @@ void create_ack_packet(void *buf, uint16_t seq)
     lcc->check = 0; //Zero means no checksum check at revciever
     lcc->ack = 1;
     lcc->seq = seq;
+    lcc->ack_time = ack_time;
     //g_send_seq++;
     //if (g_send_seq % 8 == 0)
     //    lcc->ackReq = 1;
@@ -66,7 +74,7 @@ void create_dummy_packet(void *buf)
 {
     // Ether header
     struct ethhdr *eth = (struct ethhdr *)buf;
-    memcpy(eth->h_dest, g_dst_mac_addr, ETH_ALEN);
+    memcpy(eth->h_dest, g_brd_mac_addr, ETH_ALEN);
     memcpy(eth->h_source, g_src_mac_addr, ETH_ALEN);
     eth->h_proto = htons(ETH_P_ARP);
 
@@ -342,18 +350,21 @@ void *ack_thread_function()
     int wr_id;
     struct ibv_wc wc_recv, wc_send;
     unsigned char *output;
-    uint16_t seq;
+    uint32_t seq, ack_time;
+    struct ack_queue_items queue_item;
     while (1)
     {
         if (ack_queue_head != ack_queue_tail)
         {
-            seq = ack_queue[ack_queue_head];
+            seq = ack_queue[ack_queue_head].seq;
+            ack_time = ack_queue[ack_queue_head].ack_time;
             ack_queue_head = (ack_queue_head + 1) % ACK_QUEUE_LENGTH;
             do
             {
                 msgs_completed_send = ibv_poll_cq(cq_send, 1, &wc_send);
             } while (msgs_completed_send == 0);
-            create_ack_packet(buf_send + wc_send.wr_id * ENTRY_SIZE, seq);
+
+            create_ack_packet(buf_send + wc_send.wr_id * ENTRY_SIZE, seq, ack_time);
             create_send_work_request(wr_send + wc_send.wr_id, sg_entry_send + wc_send.wr_id, mr_send, buf_send + wc_send.wr_id * ENTRY_SIZE, wc_send.wr_id, ACK);
             ret = ibv_post_send(qp, wr_send + wc_send.wr_id, &bad_wr_send);
             if (ret < 0)
@@ -367,11 +378,26 @@ void *ack_thread_function()
 
 void *recv_thread_function(void *thread_arg)
 {
+
+    unsigned long mask = 512;
+    if (pthread_setaffinity_np(pthread_self(), sizeof(mask), (cpu_set_t *)&mask))
+    {
+        fprintf(stderr, "Couldn't allocate thread cpu \n");
+    }
     int ret;
     /* 4. Create Complition Queue (CQ) */
+
+    struct ibv_exp_values values = {0};
+    ibv_exp_query_values(context, IBV_EXP_VALUES_CLOCK_INFO, &values);
+
     struct ibv_cq *cq_recv, *cq_send;
-    cq_recv = ibv_create_cq(context, RQ_NUM_DESC, NULL, NULL, 0);
+    struct ibv_exp_cq_init_attr cq_init_attr;
+    memset(&cq_init_attr, 0, sizeof(cq_init_attr));
+    cq_init_attr.flags = IBV_EXP_CQ_TIMESTAMP;
+    cq_init_attr.comp_mask = IBV_EXP_CQ_INIT_ATTR_FLAGS;
+    cq_recv = ibv_exp_create_cq(context, SQ_NUM_DESC, NULL, NULL, 0, &cq_init_attr);
     cq_send = ibv_create_cq(context, SQ_NUM_DESC, NULL, NULL, 0);
+    //cq_recv = ibv_create_cq(context, RQ_NUM_DESC, NULL, NULL, 0);
 
     if (!cq_recv || !cq_send)
     {
@@ -552,12 +578,13 @@ void *recv_thread_function(void *thread_arg)
     int msgs_completed_recv, msgs_completed_send;
     int wr_id;
     struct ibv_wc wc_recv, wc_send;
+    struct ibv_exp_wc wc_exp_recv;
     unsigned char *output;
     while (1)
     {
 
         /* wait for completion */
-        msgs_completed_recv = ibv_poll_cq(cq_recv, 1, &wc_recv);
+        msgs_completed_recv = ibv_exp_poll_cq(cq_recv, 1, &wc_exp_recv, sizeof(struct ibv_exp_wc));
         if (msgs_completed_recv > 0)
         {
             /*
@@ -566,9 +593,8 @@ void *recv_thread_function(void *thread_arg)
              * -index of descriptor completing
              * -size of the incoming packets
              */
-            g_total_recv += wc_recv.byte_len;
-
-            struct ethhdr *eth = (struct ethhdr *)((char *)buf_recv + wc_recv.wr_id * ENTRY_SIZE);
+            g_total_recv += wc_exp_recv.byte_len;
+            struct ethhdr *eth = (struct ethhdr *)((char *)buf_recv + wc_exp_recv.wr_id * ENTRY_SIZE);
             struct vlan_hdr *vlan = (struct vlan_hdr *)(eth + 1);
             struct iphdr *ip = (struct iphdr *)(vlan + 1);
             struct lcchdr *lcc = (struct lcchdr *)(ip + 1);
@@ -576,20 +602,17 @@ void *recv_thread_function(void *thread_arg)
             //If ack request is tagged
             if (lcc->ackReq == 1)
             {
-                //pthread_mutex_lock(&mutex_ack_queue);
-                //Push to ack queue
                 if ((ack_queue_tail + 1) % ACK_QUEUE_LENGTH == ack_queue_head)
                 {
                     printf("ERROR: ACK queue is full!!\n");
                     exit(1);
                 }
-
-                ack_queue[ack_queue_tail] = lcc->seq;
+                ack_queue[ack_queue_tail].seq = lcc->seq;
+                ack_queue[ack_queue_tail].ack_time = ibv_exp_cqe_ts_to_ns(&values.clock_info, wc_exp_recv.timestamp);
                 ack_queue_tail = (ack_queue_tail + 1) % ACK_QUEUE_LENGTH;
-                //pthread_mutex_unlock(&mutex_ack_queue);
             }
 
-            if (lcc->seq - g_recv_seq != 1 && g_recv_seq - lcc->seq != 65535)
+            if (lcc->seq - g_recv_seq != 1 && g_recv_seq - lcc->seq != 4294967295)
             {
                 printf("Packet Loss Detected!!!!\n");
                 printf("Current SEQ :  %d\n", lcc->seq);
@@ -597,26 +620,12 @@ void *recv_thread_function(void *thread_arg)
                 g_seq_revert++;
                 if (g_seq_revert > 100)
                 {
-                    printf("\nERROR: Too many packet loss over 100!!!\n");
-                    exit(1);
+                    //printf("\nERROR: Too many packet loss over 100!!!\n");
+                    //exit(1);
                 }
             }
             g_recv_seq = lcc->seq;
-
-            //sg_entry.addr = (uint64_t)buf + wc.wr_id * ENTRY_SIZE;
-            //wr.wr_id = wc.wr_id;
-            //printf("wr_id: %d", wr.wr_id);
-            //memcpy(buf_send, packet, sizeof(packet));
-            //ret = ibv_post_send(qp, &wr_send, &bad_wr_send);
-            //if (ret < 0)
-            //{
-            //    fprintf(stderr, "failed in post send\n");
-            //   exit(1);
-            //}
-            //msgs_completed = ibv_poll_cq(cq_send, 1, &wc);
-            /* after processed need to post back buffer */
-
-            ibv_post_recv(qp, &wr_recv[wc_recv.wr_id], &bad_wr_recv);
+            ibv_post_recv(qp, &wr_recv[wc_exp_recv.wr_id], &bad_wr_recv);
         }
         else if (msgs_completed_recv < 0)
         {
@@ -628,6 +637,13 @@ void *recv_thread_function(void *thread_arg)
 
 int main()
 {
+
+    unsigned long mask = 256;
+    if (pthread_setaffinity_np(pthread_self(), sizeof(mask), (cpu_set_t *)&mask))
+    {
+        fprintf(stderr, "Couldn't allocate thread cpu \n");
+    }
+
     int ret;
 
     /* Get the list of offload capable devices */
@@ -687,20 +703,10 @@ int main()
     double time_taken = -1;
     while (1)
     {
-        clock_gettime(CLOCK_MONOTONIC, &start);
-        if (time_taken >= 0)
-        {
-            time_taken += (start.tv_sec - previous.tv_sec) * 1e9;
-            time_taken += (start.tv_nsec - previous.tv_nsec) * 1e-9;
-            previous.tv_sec = start.tv_sec;
-            previous.tv_nsec = start.tv_nsec;
-        }
-        if (time_taken >= time_require || time_taken == -1)
-        {
-            time_taken = 0;
-            //printf("Bandwidth : %2.5f\n", g_total_recv * 8 / (time_require * 1000 * 1000 * 1000));
-            g_total_recv = 0;
-        }
+
+        usleep(50000);
+        //printf("Bandwidth : %2.5f\n", g_total_recv * 8 / (time_require * 1000 * 1000 * 1000));
+        g_total_recv = 0;
     }
 
     printf("We are done\n");

@@ -13,17 +13,20 @@
 
 #define PORT_NUM 1
 #define ENTRY_SIZE 9000  /* maximum size of each send buffer */
-#define SQ_NUM_DESC 1024/* maximum number of sends waiting for completion */
-#define RQ_NUM_DESC 256
+#define SQ_NUM_DESC 2/* maximum number of sends waiting for completion */
+#define RQ_NUM_DESC 2048
 #define NUM_SEND_THREAD 1
 #define SENDING_RATE_IN_GIGA 10
-#define DATA_PACKET_SIZE 1500
+#define DATA_PACKET_SIZE 4200
+#define ACK_REQ_INTERVAL 8
 #define TOTAL_TRANSMIT_DATA -1
+#define SEND_BUCKET_LIMIT 500000
 
 /* template of packet to send */
 #define DST_MAC 0x24, 0x8a, 0x07, 0xcb, 0x48, 0x08
 #define SRC_MAC 0x50, 0x6b, 0x4b, 0x11, 0x11, 0x11
 #define PAUSE_ETH_DST_ADDR 0x01, 0x80, 0xC2, 0x00, 0x00, 0x01
+#define BRD_MAC 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF
  
 #define VLAN_HDR 0x60, 0x09 // Priority 3show
 
@@ -32,6 +35,16 @@
 
 #define UDP_SRC 12357
 #define UDP_DST 12358
+
+#define MAX(a,b)\
+({ __typeof__ (a) _a = (a);\
+__typeof__ (b) _b = (b); \
+_a > _b ? _a : _b; })
+  
+#define MIN(a,b)\
+({ __typeof__ (a) _a = (a); \
+__typeof__ (b) _b = (b); \
+_a < _b ? _a : _b; })
 
 enum Thread_action
 {
@@ -70,18 +83,25 @@ uint64_t buf_size_recv = ENTRY_SIZE * RQ_NUM_DESC; /* maximum size of data to be
 
 static uint8_t g_dst_mac_addr[ETH_ALEN] = {DST_MAC};
 static uint8_t g_src_mac_addr[ETH_ALEN] = {SRC_MAC};
-static uint8_t g_brd_mac_addr[ETH_ALEN] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+static uint8_t g_brd_mac_addr[ETH_ALEN] = {BRD_MAC};
 static uint8_t g_eth_pause_addr[ETH_ALEN] = {PAUSE_ETH_DST_ADDR};
 static uint8_t g_vlan_hdr[VLAN_HLEN] = {VLAN_HDR};
 static uint8_t g_dst_ip[4] = {DST_IP};
 static uint8_t g_src_ip[4] = {SRC_IP};
 static uint64_t g_total_send = 0;
-static uint16_t g_send_seq = 0;
+static uint64_t g_total_recv = 0;
+static uint32_t g_send_seq = 0;
+static double g_send_rate;
+static double g_recv_rate;
 static long g_time;
+
+pthread_mutex_t mutex_seq;
+
 
 void create_data_packet(void *buf);
 void create_send_work_request(struct ibv_send_wr *, struct ibv_sge *, struct ibv_mr *, void *, uint64_t, enum Packet_type);
 void create_recv_work_request(struct ibv_qp *, struct ibv_recv_wr *, struct ibv_sge *, struct ibv_mr *, void *, struct raw_eth_flow_attr *);
 void *send_thread_fucntion(void *Thread_arg);
+void *recv_thread_fucntion(void *Thread_arg);
 void *clock_thread_function();
 static uint16_t gen_ip_checksum(const char *buf, int num_bytes);
