@@ -16,11 +16,12 @@
 #define SQ_NUM_DESC 2/* maximum number of sends waiting for completion */
 #define RQ_NUM_DESC 2048
 #define NUM_SEND_THREAD 1
-#define SENDING_RATE_IN_GIGA 10
-#define DATA_PACKET_SIZE 4200
+#define SENDING_RATE_IN_GIGA 1
+#define DATA_PACKET_SIZE 4000
 #define ACK_REQ_INTERVAL 8
 #define TOTAL_TRANSMIT_DATA -1
-#define SEND_BUCKET_LIMIT 500000
+#define SEND_BUCKET_LIMIT 400000
+#define ACK_QUEUE_LENGTH 2048
 
 /* template of packet to send */
 #define DST_MAC 0x24, 0x8a, 0x07, 0xcb, 0x48, 0x08
@@ -71,6 +72,12 @@ struct Thread_arg
     enum Thread_action thread_action;
 };
 
+struct Ack_queue
+{
+    long ack_time;
+    uint32_t seq;
+};
+
 struct raw_eth_flow_attr
 {
     struct ibv_flow_attr attr;
@@ -92,11 +99,12 @@ static uint64_t g_total_send = 0;
 static uint64_t g_total_recv = 0;
 static uint32_t g_send_seq = 0;
 static double g_send_rate;
+static double g_prev_rate;
 static double g_recv_rate;
 static long g_time;
-
-pthread_mutex_t mutex_seq;
-
+static long g_time_require;
+static int ack_queue_head = 0, ack_queue_tail = 0;
+static struct Ack_queue ack_queue[ACK_QUEUE_LENGTH];
 
 void create_data_packet(void *buf);
 void create_send_work_request(struct ibv_send_wr *, struct ibv_sge *, struct ibv_mr *, void *, uint64_t, enum Packet_type);

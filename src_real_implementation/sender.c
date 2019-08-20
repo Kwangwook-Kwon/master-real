@@ -46,18 +46,17 @@ void create_data_packet(void *buf)
     //LCC Header
     struct lcchdr *lcc = (struct lcchdr *)(ip + 1);
     memset(lcc, 0, sizeof(struct lcchdr));
-    size_t lcc_len = ip_len - sizeof(struct iphdr);
+    size_t lcc_len = ip_len - sizeof(struct ip
+    hdr);
     lcc->source = UDP_SRC;
     lcc->dest = UDP_DST;
     lcc->len = htons((uint16_t)lcc_len);
     lcc->check = 0; //Zero means no checksum check at revciever
     lcc->data = 1;
-    pthread_mutex_lock(&mutex_seq);
     lcc->seq = g_send_seq;
     if (g_send_seq % ACK_REQ_INTERVAL == 0)
         lcc->ackReq = 1;
     g_send_seq++;
-    pthread_mutex_unlock(&mutex_seq);
 
     // Payload : Data150
     void *payload = lcc + 1;
@@ -157,6 +156,12 @@ static uint16_t gen_ip_checksum(const char *buf, int num_bytes)
 
 void *clock_thread_function()
 {
+
+    unsigned long mask = 128;
+    if (pthread_setaffinity_np(pthread_self(), sizeof(mask), (cpu_set_t *)&mask))
+    {
+        fprintf(stderr, "Couldn't allocate thread cpu \n");
+    }
     struct timespec time;
     time.tv_sec = 0;
     time.tv_nsec = 0;
@@ -173,8 +178,8 @@ void *send_thread_fucntion(void *thread_arg)
     struct Thread_arg *args = (struct Thread_arg *)thread_arg;
     int thread_id = args->thread_id;
     int thread_action = args->thread_action;
-    unsigned long mask = 512 * (thread_id +1);
-    if(pthread_setaffinity_np(pthread_self(), sizeof(mask), (cpu_set_t*)&mask))
+    unsigned long mask = 512 * (thread_id + 1);
+    if (pthread_setaffinity_np(pthread_self(), sizeof(mask), (cpu_set_t *)&mask))
     {
         fprintf(stderr, "Couldn't allocate thread cpu \n");
     }
@@ -341,13 +346,15 @@ void *send_thread_fucntion(void *thread_arg)
     long time_taken = 0;
     long time_start, time_prev;
     double time_diff = 0;
-    long time_require = (double)DATA_PACKET_SIZE * 8.0 / (SENDING_RATE_IN_GIGA / NUM_SEND_THREAD);
+    g_time_require = (double)DATA_PACKET_SIZE * 8.0 / (SENDING_RATE_IN_GIGA / NUM_SEND_THREAD);
+    g_prev_rate = SENDING_RATE_IN_GIGA;
+    g_send_rate = SENDING_RATE_IN_GIGA;
 
     time_prev = g_time;
 
     //Sending procedure Loop
     printf("\n SEND Thread %d Loop Started\n", thread_id);
-    printf("\ntime require: %ld\n", time_require);
+    printf("\ntime require: %ld\n", g_time_require);
     while (1)
     {
         time_start = g_time;
@@ -357,10 +364,22 @@ void *send_thread_fucntion(void *thread_arg)
             time_taken += MIN((time_start + 1 * 1e9 - time_prev), SEND_BUCKET_LIMIT);
         time_prev = time_start;
 
-        if (time_taken >= time_require && msgs_completed_send > 0)
+        if (time_taken >= g_time_require && msgs_completed_send > 0)
         {
             //printf("wr+id: %d\n", wr_id);
             ret = ibv_post_send(qp, wr_send + wr_id, &bad_wr_send);
+            if ((g_send_seq - 1) % ACK_REQ_INTERVAL == 0 && (ack_queue_tail + 1) % ACK_QUEUE_LENGTH != ack_queue_head)
+            {
+                ack_queue[ack_queue_tail].seq = g_send_seq - 1;
+                ack_queue[ack_queue_tail].ack_time = g_time;
+                ack_queue_tail = (ack_queue_tail + 1) % ACK_QUEUE_LENGTH;
+            }
+            else if ((ack_queue_tail + 1) % ACK_QUEUE_LENGTH == ack_queue_head)
+            {
+
+                printf("ERROR: ACK queue is full!!\n");
+                exit(1);
+            }
 
             if (ret < 0)
             {
@@ -371,14 +390,15 @@ void *send_thread_fucntion(void *thread_arg)
             if (g_total_send > TOTAL_TRANSMIT_DATA && TOTAL_TRANSMIT_DATA != -1)
                 break;
             msgs_completed_send = 0;
-            time_taken -= time_require;
+            time_taken -= g_time_require;
         }
 
         if (msgs_completed_send == 0)
         {
-            do{
+            do
+            {
                 msgs_completed_send = ibv_poll_cq(cq_send, 1, &wc);
-            }while(msgs_completed_send == 0);
+            } while (msgs_completed_send == 0);
             if (msgs_completed_send > 0)
             {
                 wr_id = wc.wr_id;
@@ -397,13 +417,13 @@ void *recv_thread_fucntion(void *thread_arg)
     int thread_id = args->thread_id;
     int thread_action = args->thread_action;
 
-    unsigned long mask = 2048 * (thread_id +1);
-    if(pthread_setaffinity_np(pthread_self(), sizeof(mask), (cpu_set_t*)&mask))
+    unsigned long mask = 2048 * (thread_id + 1);
+    if (pthread_setaffinity_np(pthread_self(), sizeof(mask), (cpu_set_t *)&mask))
     {
         fprintf(stderr, "Couldn't allocate thread cpu \n");
     }
 
-    struct ibv_exp_values values = { 0 };
+    struct ibv_exp_values values = {0};
     ibv_exp_query_values(context, IBV_EXP_VALUES_CLOCK_INFO, &values);
     int ret;
     /* 1. Create Complition Queue (CQ) */
@@ -411,8 +431,8 @@ void *recv_thread_fucntion(void *thread_arg)
     struct ibv_cq *cq_send;
     struct ibv_cq *cq_recv;
 
-	struct ibv_exp_cq_init_attr cq_init_attr;
-	memset(&cq_init_attr, 0, sizeof(cq_init_attr));
+    struct ibv_exp_cq_init_attr cq_init_attr;
+    memset(&cq_init_attr, 0, sizeof(cq_init_attr));
     cq_init_attr.flags = IBV_EXP_CQ_TIMESTAMP;
     cq_init_attr.comp_mask = IBV_EXP_CQ_INIT_ATTR_FLAGS;
     cq_recv = ibv_exp_create_cq(context, SQ_NUM_DESC, NULL, NULL, 0, &cq_init_attr);
@@ -582,8 +602,10 @@ void *recv_thread_fucntion(void *thread_arg)
 
     uint32_t time_start;
     uint32_t time_prev = 0;
-    uint32_t prev_seq=0;
+    uint32_t prev_seq = 0;
     double rate_curr, rate_prev = 1;
+    uint32_t seq;
+    long ack_time;
     //RECV procedure Loop
     //printf("\n RECV Thread %d Loop Started\n", thread_id);
     while (1)
@@ -617,21 +639,47 @@ void *recv_thread_fucntion(void *thread_arg)
                 else
                     time_taken = time_start + 1 * 1e9 - time_prev;
                 //printf("================================\n");
-            
+
                 rate_curr = (double)8.0 * DATA_PACKET_SIZE * ACK_REQ_INTERVAL / time_taken;
-                rate_prev =g_recv_rate;
-                g_recv_rate = rate_curr;//g_recv_rate * 0.2 + rate_curr * 0.8; //0.2 * rate_prev + 0.8 * rate_curr;
-                //printf("seq: %d\n",lcc->seq);
-                //printf("time_taken: %ld\n", time_taken);
-                //printf("rate_curr: %f\n", rate_curr);
-                //printf("rate_prev:%f\n",rate_prev);
-                //printf("g_recv_rate:%f\n",g_recv_rate);
+                rate_prev = g_recv_rate;
+                g_recv_rate = rate_curr;
+
+                if (lcc->seq == 0 || rate_curr > g_prev_rate)
+                {
+                    g_prev_rate = g_send_rate;
+                    g_send_rate +=  0.1;
+                    //printf("increase! %f\n",g_send_rate);
+                }
+                else
+                {
+                    g_prev_rate = 0;
+                    g_send_rate = g_send_rate * 0.95;
+                    //printf("decrease! %f\n",g_send_rate);
+                }
+                g_time_require = (double)DATA_PACKET_SIZE * 8.0 / (g_send_rate / NUM_SEND_THREAD);
 
                 time_prev = time_start;
                 //printf("timestamp: %lu\n", wc_exp_recv.timestamp);
-                if(prev_seq+ACK_REQ_INTERVAL != lcc->seq)
+                if (prev_seq + ACK_REQ_INTERVAL != lcc->seq)
                     printf("Drop detected!!\n");
                 prev_seq = lcc->seq;
+
+                if (ack_queue_head != ack_queue_tail)
+                {
+                    seq = ack_queue[ack_queue_head].seq;
+                    ack_time = ack_queue[ack_queue_head].ack_time;
+                    ack_queue_head = (ack_queue_head + 1) % ACK_QUEUE_LENGTH;
+
+                    if (lcc->seq != seq)
+                    {
+                        printf("Drop detected!\nSEQ: %d\nNext SEQ: %d\n", lcc->seq, seq);
+                        exit(1);
+                    }
+                }
+                else
+                {
+                    printf("Ack buffer full!!\n");
+                }
             }
 
             ibv_post_recv(qp, &wr_recv[wc_exp_recv.wr_id], &bad_wr_recv);
@@ -648,7 +696,7 @@ void *recv_thread_fucntion(void *thread_arg)
 int main()
 {
     unsigned long mask = 256;
-    if(pthread_setaffinity_np(pthread_self(), sizeof(mask), (cpu_set_t*)&mask))
+    if (pthread_setaffinity_np(pthread_self(), sizeof(mask), (cpu_set_t *)&mask))
     {
         fprintf(stderr, "Couldn't allocate thread cpu \n");
     }
@@ -714,6 +762,8 @@ int main()
     recv_thread_arg.thread_id = 0;
     recv_thread_arg.thread_action = RECEIVING_ONLY;
     pthread_create(&recv_tread, NULL, recv_thread_fucntion, &recv_thread_arg);
+
+    usleep(1000);
 
     pthread_t p_thread[NUM_SEND_THREAD];
     int thread_id[NUM_SEND_THREAD];
