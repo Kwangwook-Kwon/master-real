@@ -14,7 +14,7 @@
 #include "header.h"
 #include "receiver.h"
 
-void create_ack_packet(void *buf, uint32_t seq, uint32_t ack_time)
+void create_ack_packet(void *buf, uint32_t seq, uint32_t ack_time, uint8_t *client_ip)
 {
 
     unsigned long mask = 1024;
@@ -46,7 +46,7 @@ void create_ack_packet(void *buf, uint32_t seq, uint32_t ack_time)
     ip->protocol = IPPROTO_UDP;
     ip->check = 0;
     memcpy(&ip->saddr, g_src_ip, 4);
-    memcpy(&ip->daddr, g_dst_ip, 4);
+    memcpy(&ip->daddr, client_ip, 4);
     ip->check = gen_ip_checksum((char *)ip, sizeof(struct iphdr));
 
     //LCC Header
@@ -352,19 +352,21 @@ void *ack_thread_function()
     unsigned char *output;
     uint32_t seq, ack_time;
     struct ack_queue_items queue_item;
+    uint8_t client_ip[4];
     while (1)
     {
         if (ack_queue_head != ack_queue_tail)
         {
             seq = ack_queue[ack_queue_head].seq;
             ack_time = ack_queue[ack_queue_head].ack_time;
+            memcpy(client_ip,ack_queue[ack_queue_head].client_ip,4);
             ack_queue_head = (ack_queue_head + 1) % ACK_QUEUE_LENGTH;
             do
             {
                 msgs_completed_send = ibv_poll_cq(cq_send, 1, &wc_send);
             } while (msgs_completed_send == 0);
 
-            create_ack_packet(buf_send + wc_send.wr_id * ENTRY_SIZE, seq, ack_time);
+            create_ack_packet(buf_send + wc_send.wr_id * ENTRY_SIZE, seq, ack_time, client_ip);
             create_send_work_request(wr_send + wc_send.wr_id, sg_entry_send + wc_send.wr_id, mr_send, buf_send + wc_send.wr_id * ENTRY_SIZE, wc_send.wr_id, ACK);
             ret = ibv_post_send(qp, wr_send + wc_send.wr_id, &bad_wr_send);
             if (ret < 0)
@@ -609,10 +611,11 @@ void *recv_thread_function(void *thread_arg)
                 }
                 ack_queue[ack_queue_tail].seq = lcc->seq;
                 ack_queue[ack_queue_tail].ack_time = ibv_exp_cqe_ts_to_ns(&values.clock_info, wc_exp_recv.timestamp);
+                memcpy(&ack_queue[ack_queue_tail].client_ip, &ip->saddr,4);
                 ack_queue_tail = (ack_queue_tail + 1) % ACK_QUEUE_LENGTH;
             }
 
-            if (lcc->seq - g_recv_seq != 1 && g_recv_seq - lcc->seq != 4294967295)
+            /*if (lcc->seq - g_recv_seq != 1 && g_recv_seq - lcc->seq != 4294967295)
             {
                 printf("Packet Loss Detected!!!!\n");
                 printf("Current SEQ :  %d\n", lcc->seq);
@@ -623,7 +626,7 @@ void *recv_thread_function(void *thread_arg)
                     //printf("\nERROR: Too many packet loss over 100!!!\n");
                     //exit(1);
                 }
-            }
+            }*/
             g_recv_seq = lcc->seq;
             ibv_post_recv(qp, &wr_recv[wc_exp_recv.wr_id], &bad_wr_recv);
         }
@@ -696,7 +699,7 @@ int main()
         thread_arg[i].thread_action = SENDING_AND_RECEVING;
         pthread_create(&p_thread[i], NULL, recv_thread_function, (void *)(thread_arg + i));
     }
-    double time_require = 0.050;
+    double time_require = 0.1;
     struct timespec start, previous;
     previous.tv_sec = 0;
     previous.tv_nsec = 0;
@@ -704,8 +707,8 @@ int main()
     while (1)
     {
 
-        usleep(50000);
-        //printf("Bandwidth : %2.5f\n", g_total_recv * 8 / (time_require * 1000 * 1000 * 1000));
+        usleep(time_require*1000*1000);
+        printf("Bandwidth : %2.5f\n", g_total_recv * 8 / (time_require * 1000 * 1000 * 1000));
         g_total_recv = 0;
     }
 

@@ -37,6 +37,9 @@ struct arphdr {
 
 struct vlan_hdr
 {
+        //uint16_t priority: 3,
+        //        dei: 1,
+        //        id: 12;
         __be16 h_vlan_TCI;
         __be16 h_vlan_encapsulated_proto;
 };

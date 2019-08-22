@@ -24,7 +24,7 @@ void create_data_packet(void *buf)
 
     //VLAN header
     struct vlan_hdr *vlan = (struct vlan_hdr *)(eth + 1);
-    memcpy(&vlan->h_vlan_TCI, g_vlan_hdr, 2);
+    vlan->h_vlan_TCI = htons(g_vlan_hdr);
     vlan->h_vlan_encapsulated_proto = htons(ETH_P_IP);
 
     //IP header
@@ -46,8 +46,7 @@ void create_data_packet(void *buf)
     //LCC Header
     struct lcchdr *lcc = (struct lcchdr *)(ip + 1);
     memset(lcc, 0, sizeof(struct lcchdr));
-    size_t lcc_len = ip_len - sizeof(struct ip
-    hdr);
+    size_t lcc_len = ip_len - sizeof(struct iphdr);
     lcc->source = UDP_SRC;
     lcc->dest = UDP_DST;
     lcc->len = htons((uint16_t)lcc_len);
@@ -157,7 +156,7 @@ static uint16_t gen_ip_checksum(const char *buf, int num_bytes)
 void *clock_thread_function()
 {
 
-    unsigned long mask = 128;
+    unsigned long mask = 2;
     if (pthread_setaffinity_np(pthread_self(), sizeof(mask), (cpu_set_t *)&mask))
     {
         fprintf(stderr, "Couldn't allocate thread cpu \n");
@@ -178,7 +177,7 @@ void *send_thread_fucntion(void *thread_arg)
     struct Thread_arg *args = (struct Thread_arg *)thread_arg;
     int thread_id = args->thread_id;
     int thread_action = args->thread_action;
-    unsigned long mask = 512 * (thread_id + 1);
+    unsigned long mask = 4;
     if (pthread_setaffinity_np(pthread_self(), sizeof(mask), (cpu_set_t *)&mask))
     {
         fprintf(stderr, "Couldn't allocate thread cpu \n");
@@ -303,7 +302,12 @@ void *send_thread_fucntion(void *thread_arg)
             .flags = 0,
         },
         .spec_eth = {.type = IBV_EXP_FLOW_SPEC_ETH, .size = sizeof(struct ibv_flow_spec_eth), .val = {
-                                                                                                  .dst_mac = {SRC_MAC},
+                                                                                                  .dst_mac[0] = g_src_mac_addr[0],
+                                                                                                  .dst_mac[1] = g_src_mac_addr[1],
+                                                                                                  .dst_mac[2] = g_src_mac_addr[2],
+                                                                                                  .dst_mac[3] = g_src_mac_addr[3],
+                                                                                                  .dst_mac[4] = g_src_mac_addr[4],
+                                                                                                  .dst_mac[5] = g_src_mac_addr[5],
                                                                                                   .src_mac = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
                                                                                                   .ether_type = 0,
                                                                                                   .vlan_tag = 0,
@@ -346,9 +350,9 @@ void *send_thread_fucntion(void *thread_arg)
     long time_taken = 0;
     long time_start, time_prev;
     double time_diff = 0;
-    g_time_require = (double)DATA_PACKET_SIZE * 8.0 / (SENDING_RATE_IN_GIGA / NUM_SEND_THREAD);
-    g_prev_rate = SENDING_RATE_IN_GIGA;
-    g_send_rate = SENDING_RATE_IN_GIGA;
+    g_time_require = (double)DATA_PACKET_SIZE * 8.0 / (g_init_rate / NUM_SEND_THREAD);
+    g_prev_rate = g_init_rate;
+    g_send_rate = g_init_rate;
 
     time_prev = g_time;
 
@@ -376,7 +380,6 @@ void *send_thread_fucntion(void *thread_arg)
             }
             else if ((ack_queue_tail + 1) % ACK_QUEUE_LENGTH == ack_queue_head)
             {
-
                 printf("ERROR: ACK queue is full!!\n");
                 exit(1);
             }
@@ -402,7 +405,6 @@ void *send_thread_fucntion(void *thread_arg)
             if (msgs_completed_send > 0)
             {
                 wr_id = wc.wr_id;
-                //printf("wrid: %d\n ",wr_id);
                 create_data_packet(buf_send + wr_id * ENTRY_SIZE);
                 create_send_work_request(wr_send + wr_id, sg_entry_send + wr_id, mr_send, buf_send + wr_id * ENTRY_SIZE, wr_id, DATA);
             }
@@ -417,7 +419,7 @@ void *recv_thread_fucntion(void *thread_arg)
     int thread_id = args->thread_id;
     int thread_action = args->thread_action;
 
-    unsigned long mask = 2048 * (thread_id + 1);
+    unsigned long mask = 8;
     if (pthread_setaffinity_np(pthread_self(), sizeof(mask), (cpu_set_t *)&mask))
     {
         fprintf(stderr, "Couldn't allocate thread cpu \n");
@@ -552,7 +554,12 @@ void *recv_thread_fucntion(void *thread_arg)
             .flags = 0,
         },
         .spec_eth = {.type = IBV_EXP_FLOW_SPEC_ETH, .size = sizeof(struct ibv_flow_spec_eth), .val = {
-                                                                                                  .dst_mac = {SRC_MAC},
+                                                                                                  .dst_mac[0] = g_src_mac_addr[0],
+                                                                                                  .dst_mac[1] = g_src_mac_addr[1],
+                                                                                                  .dst_mac[2] = g_src_mac_addr[2],
+                                                                                                  .dst_mac[3] = g_src_mac_addr[3],
+                                                                                                  .dst_mac[4] = g_src_mac_addr[4],
+                                                                                                  .dst_mac[5] = g_src_mac_addr[5],
                                                                                                   .src_mac = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
                                                                                                   .ether_type = 0,
                                                                                                   .vlan_tag = 0,
@@ -596,7 +603,6 @@ void *recv_thread_fucntion(void *thread_arg)
     int msgs_completed_recv;
 
     double time_diff = 0;
-    long time_require = (double)DATA_PACKET_SIZE * 8.0 / (SENDING_RATE_IN_GIGA / NUM_SEND_THREAD);
 
     long time_taken = 0;
 
@@ -605,7 +611,9 @@ void *recv_thread_fucntion(void *thread_arg)
     uint32_t prev_seq = 0;
     double rate_curr, rate_prev = 1;
     uint32_t seq;
+    int cnt_decrease = 0;
     long ack_time;
+    long time_now;
     //RECV procedure Loop
     //printf("\n RECV Thread %d Loop Started\n", thread_id);
     while (1)
@@ -632,6 +640,7 @@ void *recv_thread_fucntion(void *thread_arg)
             //If ack request is tagged
             if (lcc->ack == 1)
             {
+                time_now = g_time;
                 time_start = lcc->ack_time;
                 //time_start = ibv_exp_cqe_ts_to_ns(&values.clock_info, wc_exp_recv.timestamp);
                 if (time_start >= time_prev)
@@ -641,19 +650,19 @@ void *recv_thread_fucntion(void *thread_arg)
                 //printf("================================\n");
 
                 rate_curr = (double)8.0 * DATA_PACKET_SIZE * ACK_REQ_INTERVAL / time_taken;
-                rate_prev = g_recv_rate;
-                g_recv_rate = rate_curr;
+                g_recv_rate = rate_curr; // * 0.7 + g_recv_rate * 0.3;
 
-                if (lcc->seq == 0 || rate_curr > g_prev_rate)
+                if (lcc->seq == 0 || g_recv_rate + 0.05 > g_send_rate)
                 {
-                    g_prev_rate = g_send_rate;
-                    g_send_rate +=  0.1;
+                    g_send_rate += 0.05; // + g_send_rate/10 * 0.03;
                     //printf("increase! %f\n",g_send_rate);
+                    cnt_decrease = 0;
                 }
                 else
                 {
-                    g_prev_rate = 0;
-                    g_send_rate = g_send_rate * 0.95;
+                    if (cnt_decrease > 0)
+                        g_send_rate = g_send_rate * 0.90;
+                    cnt_decrease++;
                     //printf("decrease! %f\n",g_send_rate);
                 }
                 g_time_require = (double)DATA_PACKET_SIZE * 8.0 / (g_send_rate / NUM_SEND_THREAD);
@@ -669,6 +678,11 @@ void *recv_thread_fucntion(void *thread_arg)
                     seq = ack_queue[ack_queue_head].seq;
                     ack_time = ack_queue[ack_queue_head].ack_time;
                     ack_queue_head = (ack_queue_head + 1) % ACK_QUEUE_LENGTH;
+
+                    if (time_now >= ack_time)
+                        g_rtt = time_now - ack_time;
+                    else
+                        g_rtt = time_now + 1 * 1e9 - ack_time;
 
                     if (lcc->seq != seq)
                     {
@@ -695,11 +709,88 @@ void *recv_thread_fucntion(void *thread_arg)
 
 int main()
 {
-    unsigned long mask = 256;
+    unsigned long mask = 1;
     if (pthread_setaffinity_np(pthread_self(), sizeof(mask), (cpu_set_t *)&mask))
     {
         fprintf(stderr, "Couldn't allocate thread cpu \n");
     }
+
+    char readBuff[512];
+    char varBuff[256];
+
+    FILE *fp;
+
+    memset(varBuff, 0, 256);
+    printf("\n Readming Conf file...\n\n");
+    fp = fopen("lcc.conf", "r");
+    if (fp)
+    {
+        while (!feof(fp))
+        {
+            memset(readBuff, 0, 512);
+
+            if (fgets(readBuff, 512, fp) == NULL)
+            {
+                continue;
+            }
+            if (strncasecmp(readBuff, "#", strlen("#")) == 0)
+            {
+                continue;
+            }
+            if (strncasecmp(readBuff, "VLAN_ID", strlen("VLAN_ID")) == 0)
+            {
+
+                strcpy(varBuff, strrchr(readBuff, '=') + 1);
+                sscanf(varBuff, "%hd", &g_vlan_id);
+                printf(" VLAN_ID : %d", g_vlan_id);
+                g_vlan_hdr = g_vlan_id + (3 << 13);
+            }
+            if (strncasecmp(readBuff, "SRC_MAC", strlen("SRC_MAC")) == 0)
+            {
+
+                strcpy(varBuff, strrchr(readBuff, '=') + 1);
+                sscanf(varBuff, "%hhX:%hhX:%hhX:%hhX:%hhX:%hhX",
+                       &g_src_mac_addr[0], &g_src_mac_addr[1], &g_src_mac_addr[2],
+                       &g_src_mac_addr[3], &g_src_mac_addr[4], &g_src_mac_addr[5]);
+                printf(" SRC_MAC : %s", varBuff);
+            }
+            if (strncasecmp(readBuff, "DST_MAC", strlen("DST_MAC")) == 0)
+            {
+
+                strcpy(varBuff, strrchr(readBuff, '=') + 1);
+                sscanf(varBuff, "%hhX:%hhX:%hhX:%hhX:%hhX:%hhX",
+                       &g_dst_mac_addr[0], &g_dst_mac_addr[1], &g_dst_mac_addr[2],
+                       &g_dst_mac_addr[3], &g_dst_mac_addr[4], &g_dst_mac_addr[5]);
+                printf(" DST_MAC : %s", varBuff);
+            }
+            if (strncasecmp(readBuff, "SRC_IP", strlen("SRC_IP")) == 0)
+            {
+
+                strcpy(varBuff, strrchr(readBuff, '=') + 1);
+                sscanf(varBuff, "%hhd.%hhd.%hhd.%hhd",
+                       &g_src_ip[0], &g_src_ip[1], &g_src_ip[2], &g_src_ip[3]);
+                printf(" SRC_IP : %s", varBuff);
+            }
+            if (strncasecmp(readBuff, "DST_IP", strlen("DST_IP")) == 0)
+            {
+
+                strcpy(varBuff, strrchr(readBuff, '=') + 1);
+                sscanf(varBuff, "%hhd.%hhd.%hhd.%hhd",
+                       &g_dst_ip[0], &g_dst_ip[1], &g_dst_ip[2], &g_dst_ip[3]);
+                printf(" DST_IP : %s", varBuff);
+            }
+            if (strncasecmp(readBuff, "INIT_RATE", strlen("INIT_RATE")) == 0)
+            {
+                strcpy(varBuff, strrchr(readBuff, '=') + 1);
+                sscanf(varBuff, "%lf", &g_init_rate);
+                printf("\n INIT_RATE : %f", g_init_rate);
+            }
+        }
+    }
+    printf("\n\n Read End...\n\n");
+
+    fclose(fp);
+
     /*1. Get the list of offload capable devices */
     dev_list = ibv_get_device_list(NULL);
     if (!dev_list)
@@ -763,7 +854,7 @@ int main()
     recv_thread_arg.thread_action = RECEIVING_ONLY;
     pthread_create(&recv_tread, NULL, recv_thread_fucntion, &recv_thread_arg);
 
-    usleep(1000);
+    usleep(100000);
 
     pthread_t p_thread[NUM_SEND_THREAD];
     int thread_id[NUM_SEND_THREAD];
@@ -780,6 +871,10 @@ int main()
     {
         usleep(50000);
         printf("recv_rate: %f\n", g_recv_rate);
+        printf("send_rate: %f\n", g_send_rate);
+        printf("rtt: %ld\n", g_rtt);
+        printf("queue: %d\n", ack_queue_tail - ack_queue_head);
+        printf("===================\n");
     }
 
     printf("We are done\n");

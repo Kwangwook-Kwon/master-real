@@ -16,23 +16,16 @@
 #define SQ_NUM_DESC 2/* maximum number of sends waiting for completion */
 #define RQ_NUM_DESC 2048
 #define NUM_SEND_THREAD 1
-#define SENDING_RATE_IN_GIGA 1
 #define DATA_PACKET_SIZE 4000
 #define ACK_REQ_INTERVAL 8
 #define TOTAL_TRANSMIT_DATA -1
 #define SEND_BUCKET_LIMIT 400000
-#define ACK_QUEUE_LENGTH 2048
+#define ACK_QUEUE_LENGTH 5000
 
 /* template of packet to send */
-#define DST_MAC 0x24, 0x8a, 0x07, 0xcb, 0x48, 0x08
-#define SRC_MAC 0x50, 0x6b, 0x4b, 0x11, 0x11, 0x11
 #define PAUSE_ETH_DST_ADDR 0x01, 0x80, 0xC2, 0x00, 0x00, 0x01
 #define BRD_MAC 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF
  
-#define VLAN_HDR 0x60, 0x09 // Priority 3show
-
-#define SRC_IP 0x0a, 0x00, 0x09, 0x03
-#define DST_IP 0x0a, 0x00, 0x0a, 0x03
 
 #define UDP_SRC 12357
 #define UDP_DST 12358
@@ -88,21 +81,24 @@ uint64_t buf_size_send = ENTRY_SIZE * SQ_NUM_DESC; /* maximum size of data to be
 uint64_t buf_size_recv = ENTRY_SIZE * RQ_NUM_DESC; /* maximum size of data to be access directly by hw */
 
 
-static uint8_t g_dst_mac_addr[ETH_ALEN] = {DST_MAC};
-static uint8_t g_src_mac_addr[ETH_ALEN] = {SRC_MAC};
+static uint8_t g_dst_mac_addr[ETH_ALEN];// = {DST_MAC};
+static uint8_t g_src_mac_addr[ETH_ALEN];// = {SRC_MAC};
 static uint8_t g_brd_mac_addr[ETH_ALEN] = {BRD_MAC};
 static uint8_t g_eth_pause_addr[ETH_ALEN] = {PAUSE_ETH_DST_ADDR};
-static uint8_t g_vlan_hdr[VLAN_HLEN] = {VLAN_HDR};
-static uint8_t g_dst_ip[4] = {DST_IP};
-static uint8_t g_src_ip[4] = {SRC_IP};
+static uint8_t g_dst_ip[4];// = {DST_IP};
+static uint8_t g_src_ip[4];// = {SRC_IP};
+static uint16_t g_vlan_hdr;///[VLAN_HLEN] = {VLAN_HDR};
+static uint32_t g_send_seq = 0;
 static uint64_t g_total_send = 0;
 static uint64_t g_total_recv = 0;
-static uint32_t g_send_seq = 0;
+static double g_init_rate;
 static double g_send_rate;
 static double g_prev_rate;
 static double g_recv_rate;
+static long g_rtt;
 static long g_time;
 static long g_time_require;
+static short g_vlan_id;
 static int ack_queue_head = 0, ack_queue_tail = 0;
 static struct Ack_queue ack_queue[ACK_QUEUE_LENGTH];
 
