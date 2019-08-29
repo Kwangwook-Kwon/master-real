@@ -13,14 +13,13 @@
 
 #define PORT_NUM 1
 #define ENTRY_SIZE 9000  /* maximum size of each send buffer */
-#define SQ_NUM_DESC 2/* maximum number of sends waiting for completion */
+#define SQ_NUM_DESC 1/* maximum number of sends waiting for completion */
 #define RQ_NUM_DESC 2048
 #define NUM_SEND_THREAD 1
 #define DATA_PACKET_SIZE 4000
-#define ACK_REQ_INTERVAL 8
 #define TOTAL_TRANSMIT_DATA -1
-#define SEND_BUCKET_LIMIT 400000
-#define ACK_QUEUE_LENGTH 5000
+#define SEND_BUCKET_LIMIT 33000
+#define ACK_QUEUE_LENGTH 50000
 
 /* template of packet to send */
 #define PAUSE_ETH_DST_ADDR 0x01, 0x80, 0xC2, 0x00, 0x00, 0x01
@@ -28,7 +27,7 @@
  
 
 #define UDP_SRC 12357
-#define UDP_DST 12358
+#define UDP_DST 0xb711
 
 #define MAX(a,b)\
 ({ __typeof__ (a) _a = (a);\
@@ -67,7 +66,8 @@ struct Thread_arg
 
 struct Ack_queue
 {
-    long ack_time;
+    long ack_time_app;
+    uint32_t ack_time_hw;
     uint32_t seq;
 };
 
@@ -94,18 +94,27 @@ static uint64_t g_total_recv = 0;
 static double g_init_rate;
 static double g_send_rate;
 static double g_prev_rate;
-static double g_recv_rate;
-static long g_rtt;
+static double g_recv_rate = 0;
+static long g_rtt_app, g_rtt_hw;
 static long g_time;
 static long g_time_require;
+static int ack_queue_head = 0;
+static int ack_queue_tail = 0;
+static int g_ack_req_inv = 8;
 static short g_vlan_id;
-static int ack_queue_head = 0, ack_queue_tail = 0;
+static bool g_lcc_mode = true;
 static struct Ack_queue ack_queue[ACK_QUEUE_LENGTH];
 
-void create_data_packet(void *buf);
+pthread_mutex_t mutex_sender_thread;
+
+
+void create_data_packet(void *buf, bool ack);
 void create_send_work_request(struct ibv_send_wr *, struct ibv_sge *, struct ibv_mr *, void *, uint64_t, enum Packet_type);
 void create_recv_work_request(struct ibv_qp *, struct ibv_recv_wr *, struct ibv_sge *, struct ibv_mr *, void *, struct raw_eth_flow_attr *);
 void *send_thread_fucntion(void *Thread_arg);
 void *recv_thread_fucntion(void *Thread_arg);
 void *clock_thread_function();
+double find_median(double *rate_array, int arry_p);
+void swap(double *a, double *b);
+void quicksort(int left, int right, double *data);
 static uint16_t gen_ip_checksum(const char *buf, int num_bytes);

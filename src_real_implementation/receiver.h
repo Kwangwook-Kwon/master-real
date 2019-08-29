@@ -72,6 +72,7 @@ struct ack_queue_items{
     uint32_t seq;
     uint32_t ack_time;
     uint8_t client_ip[4];
+    uint8_t tos;
 };
 
 uint64_t buf_size_send = ENTRY_SIZE * SQ_NUM_DESC; /* maximum size of data to be access directly by hw */

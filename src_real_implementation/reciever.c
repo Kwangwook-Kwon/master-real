@@ -17,7 +17,7 @@
 void create_ack_packet(void *buf, uint32_t seq, uint32_t ack_time, uint8_t *client_ip)
 {
 
-    unsigned long mask = 1024;
+    unsigned long mask = 8;
     if (pthread_setaffinity_np(pthread_self(), sizeof(mask), (cpu_set_t *)&mask))
     {
         fprintf(stderr, "Couldn't allocate thread cpu \n");
@@ -164,6 +164,12 @@ static uint16_t gen_ip_checksum(const char *buf, int num_bytes)
 
 void *ack_thread_function()
 {
+    
+    unsigned long mask = 4;
+    if (pthread_setaffinity_np(pthread_self(), sizeof(mask), (cpu_set_t *)&mask))
+    {
+        fprintf(stderr, "Couldn't allocate thread cpu \n");
+    }
     int ret;
     /* 4. Create Complition Queue (CQ) */
     struct ibv_cq *cq_recv, *cq_send;
@@ -381,7 +387,7 @@ void *ack_thread_function()
 void *recv_thread_function(void *thread_arg)
 {
 
-    unsigned long mask = 512;
+    unsigned long mask = 2;
     if (pthread_setaffinity_np(pthread_self(), sizeof(mask), (cpu_set_t *)&mask))
     {
         fprintf(stderr, "Couldn't allocate thread cpu \n");
@@ -604,6 +610,8 @@ void *recv_thread_function(void *thread_arg)
             //If ack request is tagged
             if (lcc->ackReq == 1)
             {
+                            //printf("recv seq: %d\n", lcc->seq);
+
                 if ((ack_queue_tail + 1) % ACK_QUEUE_LENGTH == ack_queue_head)
                 {
                     printf("ERROR: ACK queue is full!!\n");
@@ -641,7 +649,7 @@ void *recv_thread_function(void *thread_arg)
 int main()
 {
 
-    unsigned long mask = 256;
+    unsigned long mask = 1;
     if (pthread_setaffinity_np(pthread_self(), sizeof(mask), (cpu_set_t *)&mask))
     {
         fprintf(stderr, "Couldn't allocate thread cpu \n");
@@ -708,7 +716,7 @@ int main()
     {
 
         usleep(time_require*1000*1000);
-        printf("Bandwidth : %2.5f\n", g_total_recv * 8 / (time_require * 1000 * 1000 * 1000));
+        //printf("Bandwidth : %2.5f\n", g_total_recv * 8 / (time_require * 1000 * 1000 * 1000));
         g_total_recv = 0;
     }
 

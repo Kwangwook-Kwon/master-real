@@ -2,6 +2,7 @@
 #include <infiniband/verbs.h>
 #include <infiniband/verbs_exp.h>
 #include <stdio.h>
+#include <stdbool.h>
 #include <unistd.h>
 #include <string.h>
 #include <sys/time.h>
@@ -14,7 +15,7 @@
 #include "header.h"
 #include "sender.h"
 
-void create_data_packet(void *buf)
+void create_data_packet(void *buf, bool ack)
 {
     // Ether header
     struct ethhdr *eth = (struct ethhdr *)buf;
@@ -32,7 +33,7 @@ void create_data_packet(void *buf)
     size_t ip_len = DATA_PACKET_SIZE - sizeof(struct ethhdr) - sizeof(struct vlan_hdr);
     ip->ihl = 5;
     ip->version = 4;
-    ip->tos = 64;
+    ip->tos = 65;
     ip->tot_len = htons((uint16_t)ip_len);
     ip->id = 0;
     ip->frag_off = 0;
@@ -53,7 +54,7 @@ void create_data_packet(void *buf)
     lcc->check = 0; //Zero means no checksum check at revciever
     lcc->data = 1;
     lcc->seq = g_send_seq;
-    if (g_send_seq % ACK_REQ_INTERVAL == 0)
+    if (ack == true)
         lcc->ackReq = 1;
     g_send_seq++;
 
@@ -185,9 +186,18 @@ void *send_thread_fucntion(void *thread_arg)
 
     int ret;
     /* 1. Create Complition Queue (CQ) */
+
+    struct ibv_exp_values values = {0};
+    ibv_exp_query_values(context, IBV_EXP_VALUES_CLOCK_INFO, &values);
+
     struct ibv_cq *cq_send;
     struct ibv_cq *cq_recv;
-    cq_send = ibv_create_cq(context, SQ_NUM_DESC, NULL, NULL, 0);
+    struct ibv_exp_cq_init_attr cq_init_attr;
+
+    memset(&cq_init_attr, 0, sizeof(cq_init_attr));
+    cq_init_attr.flags = IBV_EXP_CQ_TIMESTAMP;
+    cq_init_attr.comp_mask = IBV_EXP_CQ_INIT_ATTR_FLAGS;
+    cq_send = ibv_exp_create_cq(context, SQ_NUM_DESC, NULL, NULL, 0, &cq_init_attr);
     cq_recv = ibv_create_cq(context, RQ_NUM_DESC, NULL, NULL, 0);
     if (!cq_send || !cq_recv)
     {
@@ -286,50 +296,7 @@ void *send_thread_fucntion(void *thread_arg)
     struct ibv_send_wr wr_send[SQ_NUM_DESC], *bad_wr_send;
     struct ibv_recv_wr wr_recv, *bad_wr_recv;
     struct ibv_wc wc;
-    struct raw_eth_flow_attr flow_attr_pause_recv;
-    struct raw_eth_flow_attr
-    {
-        struct ibv_flow_attr attr;
-        struct ibv_flow_spec_eth spec_eth;
-    } __attribute__((packed)) flow_attr = {
-        .attr = {
-            .comp_mask = 0,
-            .type = IBV_FLOW_ATTR_NORMAL,
-            .size = sizeof(flow_attr),
-            .priority = 0,
-            .num_of_specs = 1,
-            .port = PORT_NUM,
-            .flags = 0,
-        },
-        .spec_eth = {.type = IBV_EXP_FLOW_SPEC_ETH, .size = sizeof(struct ibv_flow_spec_eth), .val = {
-                                                                                                  .dst_mac[0] = g_src_mac_addr[0],
-                                                                                                  .dst_mac[1] = g_src_mac_addr[1],
-                                                                                                  .dst_mac[2] = g_src_mac_addr[2],
-                                                                                                  .dst_mac[3] = g_src_mac_addr[3],
-                                                                                                  .dst_mac[4] = g_src_mac_addr[4],
-                                                                                                  .dst_mac[5] = g_src_mac_addr[5],
-                                                                                                  .src_mac = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
-                                                                                                  .ether_type = 0,
-                                                                                                  .vlan_tag = 0,
-                                                                                              },
-                     .mask = {
-                         .dst_mac = {BRD_MAC},
-                         .src_mac = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
-                         .ether_type = 0,
-                         .vlan_tag = 0,
-                     }},
-    };
-
-    /* 13. Create steering rule */
-    struct ibv_flow *eth_flow;
-    eth_flow = ibv_create_flow(qp, &flow_attr.attr);
-    if (!eth_flow)
-    {
-        fprintf(stderr, "Couldn't attach steering flow\n");
-        exit(1);
-    }
-
-    create_recv_work_request(qp, &wr_recv, &sg_entry_recv, mr_recv, buf_recv, &flow_attr_pause_recv);
+    struct ibv_exp_wc wc_exp_send;
 
     for (uint64_t i = 0; i < SQ_NUM_DESC; i++)
     {
@@ -350,6 +317,8 @@ void *send_thread_fucntion(void *thread_arg)
     long time_taken = 0;
     long time_start, time_prev;
     double time_diff = 0;
+    long send_time;
+    int ack_tag = g_ack_req_inv - 1;
     g_time_require = (double)DATA_PACKET_SIZE * 8.0 / (g_init_rate / NUM_SEND_THREAD);
     g_prev_rate = g_init_rate;
     g_send_rate = g_init_rate;
@@ -359,6 +328,8 @@ void *send_thread_fucntion(void *thread_arg)
     //Sending procedure Loop
     printf("\n SEND Thread %d Loop Started\n", thread_id);
     printf("\ntime require: %ld\n", g_time_require);
+    pthread_mutex_lock(&mutex_sender_thread);
+
     while (1)
     {
         time_start = g_time;
@@ -372,23 +343,22 @@ void *send_thread_fucntion(void *thread_arg)
         {
             //printf("wr+id: %d\n", wr_id);
             ret = ibv_post_send(qp, wr_send + wr_id, &bad_wr_send);
-            if ((g_send_seq - 1) % ACK_REQ_INTERVAL == 0 && (ack_queue_tail + 1) % ACK_QUEUE_LENGTH != ack_queue_head)
-            {
-                ack_queue[ack_queue_tail].seq = g_send_seq - 1;
-                ack_queue[ack_queue_tail].ack_time = g_time;
-                ack_queue_tail = (ack_queue_tail + 1) % ACK_QUEUE_LENGTH;
-            }
-            else if ((ack_queue_tail + 1) % ACK_QUEUE_LENGTH == ack_queue_head)
-            {
-                printf("ERROR: ACK queue is full!!\n");
-                exit(1);
-            }
-
+            send_time = g_time;
             if (ret < 0)
             {
                 fprintf(stderr, "failed in post send\n");
                 exit(1);
             }
+
+            if (2 * g_rtt_app > g_time_require * g_ack_req_inv)
+                g_ack_req_inv += 8;
+            else if (2.5 * g_rtt_app < g_time_require * g_ack_req_inv)
+            {
+                g_ack_req_inv -= 8;
+            }
+            g_ack_req_inv = MAX(g_ack_req_inv, 8);
+            g_ack_req_inv = MIN(g_ack_req_inv, 2048);
+
             g_total_send += DATA_PACKET_SIZE;
             if (g_total_send > TOTAL_TRANSMIT_DATA && TOTAL_TRANSMIT_DATA != -1)
                 break;
@@ -400,16 +370,40 @@ void *send_thread_fucntion(void *thread_arg)
         {
             do
             {
-                msgs_completed_send = ibv_poll_cq(cq_send, 1, &wc);
+                msgs_completed_send = ibv_exp_poll_cq(cq_send, 1, &wc_exp_send, sizeof(struct ibv_exp_wc));
             } while (msgs_completed_send == 0);
             if (msgs_completed_send > 0)
             {
-                wr_id = wc.wr_id;
-                create_data_packet(buf_send + wr_id * ENTRY_SIZE);
+                wr_id = wc_exp_send.wr_id;
+                if (ack_tag >= g_ack_req_inv - 1)
+                {
+                    if ((ack_queue_tail + 1) % ACK_QUEUE_LENGTH != ack_queue_head)
+                    {
+                        ack_queue[ack_queue_tail].seq = g_send_seq;
+                        ack_queue[ack_queue_tail].ack_time_app = send_time;
+                        ack_queue[ack_queue_tail].ack_time_hw = ibv_exp_cqe_ts_to_ns(&values.clock_info, wc_exp_send.timestamp);
+                        ack_queue_tail = (ack_queue_tail + 1) % ACK_QUEUE_LENGTH;
+                    }
+                    else if ((ack_queue_tail + 1) % ACK_QUEUE_LENGTH == ack_queue_head)
+                    {
+                        printf("ERROR: ACK queue is full!! \n");
+                        exit(1);
+                    }
+                    create_data_packet(buf_send + wr_id * ENTRY_SIZE, true);
+                    
+                    ack_tag = 0;
+                }
+                else
+                {
+                    create_data_packet(buf_send + wr_id * ENTRY_SIZE, false);
+                    ack_tag++;
+                }
                 create_send_work_request(wr_send + wr_id, sg_entry_send + wr_id, mr_send, buf_send + wr_id * ENTRY_SIZE, wr_id, DATA);
             }
         }
     }
+    pthread_mutex_unlock(&mutex_sender_thread);
+
     printf("END!!!\n");
 }
 
@@ -611,11 +605,24 @@ void *recv_thread_fucntion(void *thread_arg)
     uint32_t prev_seq = 0;
     double rate_curr, rate_prev = 1;
     uint32_t seq;
-    int cnt_decrease = 0;
-    long ack_time;
-    long time_now;
+    int cnt_decrease = 1;
+    long ack_time_app;
+    uint32_t ack_time_hw;
+    long time_now_app;
+    uint32_t time_now_hw;
+    double rate_arry[5] = {0, 0, 0, 0, 0};
+    int arry_p = 0;
     //RECV procedure Loop
-    //printf("\n RECV Thread %d Loop Started\n", thread_id);
+    printf("\n RECV Thread %d Loop Started\n", thread_id);
+    FILE *fp = fopen("trace_rtt.out", "w");
+    fprintf(fp, "rate_median,rate,rate_send,rtt\n");
+
+    double running_time;
+    double start_time = 0;
+    struct timespec time;
+    clock_gettime(CLOCK_MONOTONIC, &time);
+
+    start_time = (double)time.tv_sec + (double)time.tv_nsec / (1000 * 1000 * 1000);
     while (1)
     {
         /* wait for completion */
@@ -630,73 +637,105 @@ void *recv_thread_fucntion(void *thread_arg)
              * -index of descriptor completing
              * -size of the incoming packets
              */
-            g_total_recv += wc_recv.byte_len;
+            g_total_recv += 1;
 
             struct ethhdr *eth = (struct ethhdr *)((char *)buf_recv + wc_exp_recv.wr_id * ENTRY_SIZE);
             struct vlan_hdr *vlan = (struct vlan_hdr *)(eth + 1);
             struct iphdr *ip = (struct iphdr *)(vlan + 1);
             struct lcchdr_ack *lcc = (struct lcchdr_ack *)(ip + 1);
-
             //If ack request is tagged
             if (lcc->ack == 1)
             {
-                time_now = g_time;
+                time_now_app = g_time;
+                if (time_prev == 0)
+                {
+                    time_prev = lcc->ack_time;
+                    goto dequeue;
+                }
+
                 time_start = lcc->ack_time;
-                //time_start = ibv_exp_cqe_ts_to_ns(&values.clock_info, wc_exp_recv.timestamp);
+                time_now_hw = ibv_exp_cqe_ts_to_ns(&values.clock_info, wc_exp_recv.timestamp);
                 if (time_start >= time_prev)
                     time_taken = time_start - time_prev;
                 else
                     time_taken = time_start + 1 * 1e9 - time_prev;
-                //printf("================================\n");
-
-                rate_curr = (double)8.0 * DATA_PACKET_SIZE * ACK_REQ_INTERVAL / time_taken;
-                g_recv_rate = rate_curr; // * 0.7 + g_recv_rate * 0.3;
-
-                if (lcc->seq == 0 || g_recv_rate + 0.05 > g_send_rate)
-                {
-                    g_send_rate += 0.05; // + g_send_rate/10 * 0.03;
-                    //printf("increase! %f\n",g_send_rate);
-                    cnt_decrease = 0;
-                }
-                else
-                {
-                    if (cnt_decrease > 0)
-                        g_send_rate = g_send_rate * 0.90;
-                    cnt_decrease++;
-                    //printf("decrease! %f\n",g_send_rate);
-                }
-                g_time_require = (double)DATA_PACKET_SIZE * 8.0 / (g_send_rate / NUM_SEND_THREAD);
 
                 time_prev = time_start;
-                //printf("timestamp: %lu\n", wc_exp_recv.timestamp);
-                if (prev_seq + ACK_REQ_INTERVAL != lcc->seq)
-                    printf("Drop detected!!\n");
+                //printf("================================\n");
+
+                rate_curr = (double)8.0 * DATA_PACKET_SIZE * (lcc->seq - prev_seq) / time_taken;
+                rate_arry[arry_p] = rate_curr;
+                arry_p = (arry_p + 1) % 3;
+                g_recv_rate = find_median(rate_arry, arry_p); //rate_curr * 0.7 + g_recv_rate * 0.3;
+                //if (g_recv_rate == 0)
+                //    g_recv_rate = rate_curr;
+                //printf("%f: %f, %f, %f\n",g_recv_rate, rate_arry[0], rate_arry[1], rate_arry[2]);
+
+                if (g_lcc_mode)
+                {
+                    if (lcc->seq == 0 || g_recv_rate + 0.15 > g_send_rate)
+                    {
+                        g_send_rate += 0.05; // + g_send_rate / 10 * 0.02;
+                        //printf("increase! %f\n",g_send_rate);
+                        cnt_decrease = 1;
+                    }
+                    else
+                    {
+                        g_send_rate = g_recv_rate * 0.85; // * (1 - cnt_decrease * 0.1);
+                        cnt_decrease++;
+                        cnt_decrease = MIN(cnt_decrease, 10);
+                        //printf("decrease! %f\n",g_send_rate);
+                    }
+                    g_time_require = (double)DATA_PACKET_SIZE * 8.0 / (g_send_rate / NUM_SEND_THREAD);
+                }
+            //printf("timestamp: %lu\n", wc_exp_recv.timestamp);
+            //if (prev_seq + g_ack_req_inv != lcc->seq)
+            //    printf("Drop detected!!\n");
+            dequeue:
                 prev_seq = lcc->seq;
 
                 if (ack_queue_head != ack_queue_tail)
                 {
                     seq = ack_queue[ack_queue_head].seq;
-                    ack_time = ack_queue[ack_queue_head].ack_time;
+                    ack_time_app = ack_queue[ack_queue_head].ack_time_app;
+                    ack_time_hw = ack_queue[ack_queue_head].ack_time_hw;
                     ack_queue_head = (ack_queue_head + 1) % ACK_QUEUE_LENGTH;
 
-                    if (time_now >= ack_time)
-                        g_rtt = time_now - ack_time;
+                    if (time_now_app >= ack_time_app)
+                        g_rtt_app = time_now_app - ack_time_app;
                     else
-                        g_rtt = time_now + 1 * 1e9 - ack_time;
+                        g_rtt_app = time_now_app + 1 * 1e9 - ack_time_app;
 
+                    if (time_now_hw >= ack_time_hw)
+                        g_rtt_hw = time_now_hw - ack_time_hw;
+                    else
+                        g_rtt_hw = time_now_hw + 1 * 1e9 - ack_time_hw;
+
+
+                    //printf("\nrecv seq: %d \n", lcc->seq);
                     if (lcc->seq != seq)
                     {
-                        printf("Drop detected!\nSEQ: %d\nNext SEQ: %d\n", lcc->seq, seq);
-                        exit(1);
+                        //printf("Drop detected!\nSEQ: %d\nNext SEQ: %d\nACK_INV: %d\n\n", lcc->seq, seq, g_ack_req_inv);
+                        //for (int i = ack_queue_head; i <= ack_queue_tail; i++)
+                       // {
+                       //     printf("SEQ: %d\n", ack_queue[i].seq);
+                       // }
+                       // exit(1);
+                        //printf("\n\n\n");
                     }
                 }
                 else
                 {
                     printf("Ack buffer full!!\n");
                 }
+                //clock_gettime(CLOCK_MONOTONIC, &time);
+                //running_time = (double)time.tv_sec + (double)time.tv_nsec / (1000 * 1000 * 1000) - start_time;
+                //find_median(rate_array, arry_p);
+                //fprintf(fp, "%ld, %ld, %ld\n", lcc->seq, g_rtt_app, g_rtt_hw);
+                //fflush(fp);
             }
 
-            ibv_post_recv(qp, &wr_recv[wc_exp_recv.wr_id], &bad_wr_recv);
+            ibv_post_recv(qp, &wr_recv[wc_recv.wr_id], &bad_wr_recv);
         }
         else if (msgs_completed_recv < 0)
         {
@@ -707,8 +746,116 @@ void *recv_thread_fucntion(void *thread_arg)
     printf("END!!!\n");
 }
 
+double find_median(double *rate_array, int arry_p)
+{
+    double array_tmp[3];
+    memcpy(array_tmp, rate_array, sizeof(double) * 3);
+
+    if (rate_array[1] == 0)
+    {
+        return rate_array[0];
+    }
+    else if (rate_array[2] == 0)
+    {
+        return MIN(rate_array[0], rate_array[1]);
+    }
+    else if (rate_array[3] == 0)
+    {
+        quicksort(0, 2, array_tmp);
+        return array_tmp[1];
+    }
+    else if (rate_array[4] == 0)
+    {
+        quicksort(0, 3, array_tmp);
+        return array_tmp[2];
+    }
+    quicksort(0, 4, array_tmp);
+    return array_tmp[2];
+
+    /*int before = (arry_p - 1) % 10;
+    int before2 = (arry_p - 2) % 10;
+    if(before < 0 )
+        before += 10;
+    if(before2 < 0 )
+        before2 += 10;
+
+    if (rate_array[arry_p] >= rate_array[before])
+    {
+        if (rate_array[before] >= rate_array[before2])
+        {
+            return rate_array[before];
+        }
+        else if (rate_array[arry_p] >= rate_array[before2])
+        {
+            return rate_array[before2];
+        }
+        else
+        {
+            return rate_array[arry_p];
+        }
+    }
+    else if (rate_array[before] >= rate_array[arry_p])
+    {
+        if (rate_array[arry_p] >= rate_array[before2])
+        {
+            return rate_array[arry_p];
+        }
+        else if (rate_array[before] >= rate_array[before2])
+        {
+            return rate_array[before2];
+        }
+        else
+        {
+            return rate_array[before];
+        }
+    }*/
+}
+
+void quicksort(int left, int right, double *arr)
+{
+
+    if (arr[right] == 0)
+    {
+        quicksort(left, right - 1, arr);
+        return;
+    }
+    int i = left, j = right;
+    double pivot = arr[(left + right) / 2];
+    double temp;
+    do
+    {
+        while (arr[i] < pivot)
+            i++;
+        while (arr[j] > pivot)
+            j--;
+        if (i <= j)
+        {
+            temp = arr[i];
+            arr[i] = arr[j];
+            arr[j] = temp;
+            i++;
+            j--;
+        }
+    } while (i <= j);
+
+    /* recursion */
+    if (left < j)
+        quicksort(left, j, arr);
+
+    if (i < right)
+        quicksort(i, right, arr);
+}
+
+void swap(double *a, double *b)
+{
+    double t = *a;
+    *a = *b;
+    *b = t;
+}
+
 int main()
 {
+    printf("\n\n %d", -1 % 5);
     unsigned long mask = 1;
     if (pthread_setaffinity_np(pthread_self(), sizeof(mask), (cpu_set_t *)&mask))
     {
@@ -784,6 +931,15 @@ int main()
                 strcpy(varBuff, strrchr(readBuff, '=') + 1);
                 sscanf(varBuff, "%lf", &g_init_rate);
                 printf("\n INIT_RATE : %f", g_init_rate);
+            }
+            if (strncasecmp(readBuff, "LCC_MODE", strlen("LCC_MODE")) == 0)
+            {
+                strcpy(varBuff, strrchr(readBuff, '=') + 1);
+                if (strncasecmp(varBuff, "ON", strlen("ON")) == 0)
+                    g_lcc_mode = true;
+                else if (strncasecmp(varBuff, "OFF", strlen("OFF")) == 0)
+                    g_lcc_mode = false;
+                printf("\n LCC_MODE : %d", g_lcc_mode);
             }
         }
     }
@@ -867,17 +1023,34 @@ int main()
         pthread_create(&p_thread[i], NULL, send_thread_fucntion, (void *)(thread_arg + i));
     }
 
+    fp = fopen("trace.out", "w");
+    fprintf(fp, "time, recv_rate, send_rate, rtt_app, rtt_hw, ack_queue_len\n");
+    struct timespec time;
+    clock_gettime(CLOCK_MONOTONIC, &time);
+    double start_time = (double)time.tv_sec + (double)time.tv_nsec / (1000 * 1000 * 1000);
+    double time_now;
+    int sleep_cnt = 0;
+    struct timeval val;
+    struct tm *ptm;
     while (1)
     {
-        usleep(50000);
-        printf("recv_rate: %f\n", g_recv_rate);
-        printf("send_rate: %f\n", g_send_rate);
-        printf("rtt: %ld\n", g_rtt);
-        printf("queue: %d\n", ack_queue_tail - ack_queue_head);
-        printf("===================\n");
+        usleep(10);
+        gettimeofday(&val, NULL);
+        ptm = localtime(&val.tv_sec);
+
+        if (g_recv_rate > 0)
+            fprintf(fp, "%02d%02d%02d.%06ld, %f, %f, %ld, %ld ,%d\n", ptm->tm_hour, ptm->tm_min, ptm->tm_sec, val.tv_usec, g_recv_rate, g_send_rate, g_rtt_app, g_rtt_hw ,ack_queue_tail - ack_queue_head);
+        sleep_cnt++;
+        if (sleep_cnt > 10000)
+        {
+            printf("%02d%02d%02d.%06ld, %f, %f, %ld, %ld, %d, %d\n", ptm->tm_hour, ptm->tm_min, ptm->tm_sec, val.tv_usec, g_recv_rate, g_send_rate, g_rtt_app, g_rtt_hw ,ack_queue_tail - ack_queue_head, g_ack_req_inv);
+            sleep_cnt = 0;
+        }
     }
 
-    printf("We are done\n");
+    fclose(fp);
+
+    printf("We are done \n");
 
     return 0;
 }
