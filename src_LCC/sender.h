@@ -13,13 +13,14 @@
 
 #define PORT_NUM 1
 #define ENTRY_SIZE 9000  /* maximum size of each send buffer */
-#define SQ_NUM_DESC 1/* maximum number of sends waiting for completion */
+#define SQ_NUM_DESC 1024/* maximum number of sends waiting for completion */
 #define RQ_NUM_DESC 2048
 #define NUM_SEND_THREAD 1
-#define DATA_PACKET_SIZE 4000
+#define DATA_PACKET_SIZE 1000
 #define TOTAL_TRANSMIT_DATA -1
 #define SEND_BUCKET_LIMIT 33000
 #define ACK_QUEUE_LENGTH 50000
+#define DATA_QUEUE_LENGTH 1030
 
 /* template of packet to send */
 #define PAUSE_ETH_DST_ADDR 0x01, 0x80, 0xC2, 0x00, 0x00, 0x01
@@ -71,13 +72,24 @@ struct Ack_queue
     uint32_t seq;
 };
 
+struct Data_queue
+{
+    void *buf;
+    int wr_id;
+};
+
+struct Data_allow_queue
+{
+    int wr_id;
+};
+
 struct raw_eth_flow_attr
 {
     struct ibv_flow_attr attr;
     struct ibv_flow_spec_eth spec_eth;
 };
 
-uint64_t buf_size_send = ENTRY_SIZE * SQ_NUM_DESC; /* maximum size of data to be access directly by hw */
+uint64_t buf_size_send = ENTRY_SIZE * DATA_QUEUE_LENGTH; /* maximum size of data to be access directly by hw */
 uint64_t buf_size_recv = ENTRY_SIZE * RQ_NUM_DESC; /* maximum size of data to be access directly by hw */
 
 
@@ -100,10 +112,17 @@ static long g_time;
 static long g_time_require;
 static int ack_queue_head = 0;
 static int ack_queue_tail = 0;
+static int data_queue_head = 0;
+static int data_queue_tail = 0;
+static int data_allow_queue_head = 0;
+static int data_allow_queue_tail = 0;
 static int g_ack_req_inv = 8;
 static short g_vlan_id;
 static bool g_lcc_mode = true;
 static struct Ack_queue ack_queue[ACK_QUEUE_LENGTH];
+static struct Data_queue data_queue[DATA_QUEUE_LENGTH];
+static struct Data_allow_queue data_allow_queue[DATA_QUEUE_LENGTH];
+static void *buf_send;
 
 pthread_mutex_t mutex_sender_thread;
 
@@ -113,6 +132,7 @@ void create_send_work_request(struct ibv_send_wr *, struct ibv_sge *, struct ibv
 void create_recv_work_request(struct ibv_qp *, struct ibv_recv_wr *, struct ibv_sge *, struct ibv_mr *, void *, struct raw_eth_flow_attr *);
 void *send_thread_fucntion(void *Thread_arg);
 void *recv_thread_fucntion(void *Thread_arg);
+void *make_packet_function(void *thread_arg);
 void *clock_thread_function();
 double find_median(double *rate_array, int arry_p);
 void swap(double *a, double *b);

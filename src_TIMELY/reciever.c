@@ -707,7 +707,7 @@ int main()
         thread_arg[i].thread_action = SENDING_AND_RECEVING;
         pthread_create(&p_thread[i], NULL, recv_thread_function, (void *)(thread_arg + i));
     }
-    double time_require = 0.1;
+    double time_require = 1;
     struct timespec start, previous;
     previous.tv_sec = 0;
     previous.tv_nsec = 0;
@@ -716,7 +716,7 @@ int main()
     {
 
         usleep(time_require*1000*1000);
-        //printf("Bandwidth : %2.5f\n", g_total_recv * 8 / (time_require * 1000 * 1000 * 1000));
+        printf("Bandwidth : %2.5f\n", g_total_recv * 8 / (time_require * 1000 * 1000 * 1000));
         g_total_recv = 0;
     }
 

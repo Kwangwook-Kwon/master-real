@@ -319,7 +319,7 @@ void *send_thread_fucntion(void *thread_arg)
     double time_diff = 0;
     long send_time;
     int ack_tag = g_ack_req_inv - 1;
-    g_time_require = (double)DATA_PACKET_SIZE * 8.0 / (g_init_rate / NUM_SEND_THREAD);
+    g_time_require = (double)DATA_PACKET_SIZE * 8.0 * 16 / (g_init_rate / NUM_SEND_THREAD);
     g_prev_rate = g_init_rate;
     g_send_rate = g_init_rate;
 
@@ -339,66 +339,61 @@ void *send_thread_fucntion(void *thread_arg)
             time_taken += MIN((time_start + 1 * 1e9 - time_prev), SEND_BUCKET_LIMIT);
         time_prev = time_start;
 
-        if (time_taken >= g_time_require && msgs_completed_send > 0)
+        if (time_taken >= g_time_require)
         {
-            //printf("wr+id: %d\n", wr_id);
-            ret = ibv_post_send(qp, wr_send + wr_id, &bad_wr_send);
-            send_time = g_time;
-            if (ret < 0)
-            {
-                fprintf(stderr, "failed in post send\n");
-                exit(1);
-            }
-
-            if (2 * g_rtt_app > g_time_require * g_ack_req_inv)
-                g_ack_req_inv += 8;
-            else if (2.5 * g_rtt_app < g_time_require * g_ack_req_inv)
-            {
-                g_ack_req_inv -= 8;
-            }
-            g_ack_req_inv = MAX(g_ack_req_inv, 8);
-            g_ack_req_inv = MIN(g_ack_req_inv, 2048);
-
-            g_total_send += DATA_PACKET_SIZE;
-            if (g_total_send > TOTAL_TRANSMIT_DATA && TOTAL_TRANSMIT_DATA != -1)
-                break;
-            msgs_completed_send = 0;
             time_taken -= g_time_require;
-        }
 
-        if (msgs_completed_send == 0)
-        {
-            do
+            for (int i = 0; i < 16; i++)
             {
-                msgs_completed_send = ibv_exp_poll_cq(cq_send, 1, &wc_exp_send, sizeof(struct ibv_exp_wc));
-            } while (msgs_completed_send == 0);
-            if (msgs_completed_send > 0)
-            {
-                wr_id = wc_exp_send.wr_id;
-                if (ack_tag >= g_ack_req_inv - 1)
+                if (msgs_completed_send > 0)
                 {
-                    if ((ack_queue_tail + 1) % ACK_QUEUE_LENGTH != ack_queue_head)
+                    //printf("wr+id: %d\n", wr_id);
+                    ret = ibv_post_send(qp, wr_send + wr_id, &bad_wr_send);
+                    send_time = g_time;
+                    if (ret < 0)
                     {
-                        ack_queue[ack_queue_tail].seq = g_send_seq;
-                        ack_queue[ack_queue_tail].ack_time_app = send_time;
-                        ack_queue[ack_queue_tail].ack_time_hw = ibv_exp_cqe_ts_to_ns(&values.clock_info, wc_exp_send.timestamp);
-                        ack_queue_tail = (ack_queue_tail + 1) % ACK_QUEUE_LENGTH;
-                    }
-                    else if ((ack_queue_tail + 1) % ACK_QUEUE_LENGTH == ack_queue_head)
-                    {
-                        printf("ERROR: ACK queue is full!! \n");
+                        fprintf(stderr, "failed in post send\n");
                         exit(1);
                     }
-                    create_data_packet(buf_send + wr_id * ENTRY_SIZE, true);
-                    
-                    ack_tag = 0;
+                    g_total_send += DATA_PACKET_SIZE;
+                    if (g_total_send > TOTAL_TRANSMIT_DATA && TOTAL_TRANSMIT_DATA != -1)
+                        break;
+                    msgs_completed_send = 0;
                 }
-                else
+                if (msgs_completed_send == 0)
                 {
-                    create_data_packet(buf_send + wr_id * ENTRY_SIZE, false);
-                    ack_tag++;
+                    do
+                    {
+                        msgs_completed_send = ibv_exp_poll_cq(cq_send, 1, &wc_exp_send, sizeof(struct ibv_exp_wc));
+                    } while (msgs_completed_send == 0);
+                    if (msgs_completed_send > 0)
+                    {
+                        wr_id = wc_exp_send.wr_id;
+                        if (ack_tag >= g_ack_req_inv - 1)
+                        {
+                            if ((ack_queue_tail + 1) % ACK_QUEUE_LENGTH != ack_queue_head)
+                            {
+                                ack_queue[ack_queue_tail].seq = g_send_seq;
+                                ack_queue[ack_queue_tail].ack_time_app = send_time;
+                                ack_queue[ack_queue_tail].ack_time_hw = ibv_exp_cqe_ts_to_ns(&values.clock_info, wc_exp_send.timestamp);
+                                ack_queue_tail = (ack_queue_tail + 1) % ACK_QUEUE_LENGTH;
+                            }
+                            else if ((ack_queue_tail + 1) % ACK_QUEUE_LENGTH == ack_queue_head)
+                            {
+                                printf("ERROR: ACK queue is full!! \n");
+                                exit(1);
+                            }
+                            create_data_packet(buf_send + wr_id * ENTRY_SIZE, true);
+                            ack_tag = 0;
+                        }
+                        else
+                        {
+                            create_data_packet(buf_send + wr_id * ENTRY_SIZE, false);
+                            ack_tag++;
+                        }
+                        create_send_work_request(wr_send + wr_id, sg_entry_send + wr_id, mr_send, buf_send + wr_id * ENTRY_SIZE, wr_id, DATA);
+                    }
                 }
-                create_send_work_request(wr_send + wr_id, sg_entry_send + wr_id, mr_send, buf_send + wr_id * ENTRY_SIZE, wr_id, DATA);
             }
         }
     }
@@ -622,6 +617,12 @@ void *recv_thread_fucntion(void *thread_arg)
     struct timespec time;
     clock_gettime(CLOCK_MONOTONIC, &time);
 
+    double normalized_gradiant; // =  m_rtt_diff / m_min_rtt;
+    long rtt_diff;
+    double new_rtt_diff;
+    long prev_rtt = 0;
+    char *updaterule;
+    int mN = 0;
     start_time = (double)time.tv_sec + (double)time.tv_nsec / (1000 * 1000 * 1000);
     while (1)
     {
@@ -637,8 +638,6 @@ void *recv_thread_fucntion(void *thread_arg)
              * -index of descriptor completing
              * -size of the incoming packets
              */
-            g_total_recv += 1;
-
             struct ethhdr *eth = (struct ethhdr *)((char *)buf_recv + wc_exp_recv.wr_id * ENTRY_SIZE);
             struct vlan_hdr *vlan = (struct vlan_hdr *)(eth + 1);
             struct iphdr *ip = (struct iphdr *)(vlan + 1);
@@ -646,6 +645,7 @@ void *recv_thread_fucntion(void *thread_arg)
             //If ack request is tagged
             if (lcc->ack == 1)
             {
+                //printf("ack recv\n");
                 time_now_app = g_time;
                 if (time_prev == 0)
                 {
@@ -688,9 +688,7 @@ void *recv_thread_fucntion(void *thread_arg)
                     }
                     g_time_require = (double)DATA_PACKET_SIZE * 8.0 / (g_send_rate / NUM_SEND_THREAD);
                 }
-            //printf("timestamp: %lu\n", wc_exp_recv.timestamp);
-            //if (prev_seq + g_ack_req_inv != lcc->seq)
-            //    printf("Drop detected!!\n");
+
             dequeue:
                 prev_seq = lcc->seq;
 
@@ -711,17 +709,56 @@ void *recv_thread_fucntion(void *thread_arg)
                     else
                         g_rtt_hw = time_now_hw + 1 * 1e9 - ack_time_hw;
 
-
                     //printf("\nrecv seq: %d \n", lcc->seq);
                     if (lcc->seq != seq)
                     {
                         //printf("Drop detected!\nSEQ: %d\nNext SEQ: %d\nACK_INV: %d\n\n", lcc->seq, seq, g_ack_req_inv);
                         //for (int i = ack_queue_head; i <= ack_queue_tail; i++)
-                       // {
-                       //     printf("SEQ: %d\n", ack_queue[i].seq);
-                       // }
-                       // exit(1);
+                        // {
+                        //     printf("SEQ: %d\n", ack_queue[i].seq);
+                        // }
+                        // exit(1);
                         //printf("\n\n\n");
+                    }
+
+                    if (g_timely_mode)
+                    {
+                        new_rtt_diff = g_rtt_app - prev_rtt;
+                        rtt_diff = (1 - 0.8) * rtt_diff + 0.8 * new_rtt_diff;
+                        normalized_gradiant = (double) rtt_diff / (100.0 * 1000.0); //min_rtt;
+                        g_normalize_gradient =normalized_gradiant;
+
+                        if (g_rtt_app < 30 * 1000 /*m_t_low*/) 
+                        {
+                            mN++;
+                            updaterule = "t_low";
+                            g_send_rate += 0.01; //m_newRate = m_rate + m_delta;
+                        }
+                        else if (g_rtt_app > 500 * 1000) //m_t_high)
+                        {
+                            updaterule = "t_high";
+                            g_send_rate = g_send_rate * (1 - 0.8 * (1 - 500 * 1000 / g_rtt_app)); //m_newRate = m_rate * (1 - m_beta * (1 - m_t_high / m_new_rtt));
+                        }
+                        else if (normalized_gradiant < 0)
+                        {
+                            mN++;
+                            updaterule = "negative_grad";
+                            if (mN > 4)
+                                g_send_rate += 5 * 0.01; //  m_newRate = m_rate + m_N * m_delta;
+                            else
+                                g_send_rate += 0.01;
+                        }
+                        else
+                        {
+                            mN = 0;
+                            updaterule = "pos_grad";
+                            g_send_rate = g_send_rate * (1 - 0.8 * normalized_gradiant); //m_newRate = m_rate * (1 - m_beta * normalized_gradiant);
+                        }
+                        g_send_rate = MAX(0.2, g_send_rate);
+                        g_send_rate = MIN(9.9, g_send_rate);
+                        g_time_require = (double)DATA_PACKET_SIZE * 8.0 * 16 / (g_send_rate / NUM_SEND_THREAD);
+                        prev_rtt = g_rtt_app;
+                        // printf("rule : %s\n", updaterule);
                     }
                 }
                 else
@@ -1039,11 +1076,11 @@ int main()
         ptm = localtime(&val.tv_sec);
 
         if (g_recv_rate > 0)
-            fprintf(fp, "%02d%02d%02d.%06ld, %f, %f, %ld, %ld ,%d\n", ptm->tm_hour, ptm->tm_min, ptm->tm_sec, val.tv_usec, g_recv_rate, g_send_rate, g_rtt_app, g_rtt_hw ,ack_queue_tail - ack_queue_head);
+            fprintf(fp, "%02d%02d%02d.%06ld, %f, %f, %ld, %ld ,%d, %f\n", ptm->tm_hour, ptm->tm_min, ptm->tm_sec, val.tv_usec, g_recv_rate, g_send_rate, g_rtt_app, g_rtt_hw, ack_queue_tail - ack_queue_head, g_normalize_gradient);
         sleep_cnt++;
         if (sleep_cnt > 10000)
         {
-            printf("%02d%02d%02d.%06ld, %f, %f, %ld, %ld, %d, %d\n", ptm->tm_hour, ptm->tm_min, ptm->tm_sec, val.tv_usec, g_recv_rate, g_send_rate, g_rtt_app, g_rtt_hw ,ack_queue_tail - ack_queue_head, g_ack_req_inv);
+            printf("%02d%02d%02d.%06ld, %f, %f, %ld, %ld, %d, %d\n", ptm->tm_hour, ptm->tm_min, ptm->tm_sec, val.tv_usec, g_recv_rate, g_send_rate, g_rtt_app, g_rtt_hw, ack_queue_tail - ack_queue_head, g_ack_req_inv);
             sleep_cnt = 0;
         }
     }
