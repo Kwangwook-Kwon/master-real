@@ -123,6 +123,7 @@ static struct Ack_queue ack_queue[ACK_QUEUE_LENGTH];
 static struct Data_queue data_queue[DATA_QUEUE_LENGTH];
 static struct Data_allow_queue data_allow_queue[DATA_QUEUE_LENGTH];
 static void *buf_send;
+static int recv_data;
 
 pthread_mutex_t mutex_sender_thread;
 

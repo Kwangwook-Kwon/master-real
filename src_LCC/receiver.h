@@ -93,6 +93,7 @@ static int ack_queue_head = 0, ack_queue_tail = 0;
 static struct ack_queue_items ack_queue[ACK_QUEUE_LENGTH];
 
 pthread_mutex_t mutex_ack_queue;
+pthread_mutex_t mutex_g_recv_data;
 
 
 void create_data_packet(void *buf);

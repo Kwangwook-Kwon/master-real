@@ -357,6 +357,9 @@ void *send_thread_fucntion(void *thread_arg)
             struct vlan_hdr *vlan = (struct vlan_hdr *)(eth + 1);
             struct iphdr *ip = (struct iphdr *)(vlan + 1);
             struct lcchdr_ack *lcc = (struct lcchdr_ack *)(ip + 1);
+            wr_id = data_queue[data_queue_head].wr_id;
+            create_send_work_request(wr_send + wr_id, sg_entry_send + wr_id, mr_send, data_queue[data_queue_head].buf, wr_id, DATA);
+            ret = ibv_post_send(qp, wr_send + wr_id, &bad_wr_send);
             if (lcc->ackReq == 1)
             {
                 if ((ack_queue_tail + 1) % ACK_QUEUE_LENGTH != ack_queue_head)
@@ -371,9 +374,6 @@ void *send_thread_fucntion(void *thread_arg)
                     exit(1);
                 }
             }
-            wr_id = data_queue[data_queue_head].wr_id;
-            create_send_work_request(wr_send + wr_id, sg_entry_send + wr_id, mr_send, data_queue[data_queue_head].buf, wr_id, DATA);
-            ret = ibv_post_send(qp, wr_send + wr_id, &bad_wr_send);
             if (ret < 0)
             {
                 fprintf(stderr, "failed in post send\n");
@@ -428,11 +428,11 @@ void *make_packet_function(void *thread_arg)
                 {
                     create_data_packet(buf_send + data_allow_queue[data_allow_queue_head].wr_id * ENTRY_SIZE, true);
                     ack_tag = 0;
-                    if (30 * g_rtt_app > g_time_require * g_ack_req_inv)
-                        g_ack_req_inv += 8;
-                    else if (35 * g_rtt_app < g_time_require * g_ack_req_inv)
+                    if (10 * g_rtt_app > g_time_require * g_ack_req_inv)
+                        g_ack_req_inv += 1;
+                    else if (11 * g_rtt_app < g_time_require * g_ack_req_inv)
                     {
-                        g_ack_req_inv -= 8;
+                        g_ack_req_inv -= 1;
                     }
                     g_ack_req_inv = MAX(g_ack_req_inv, 8);
                     g_ack_req_inv = MIN(g_ack_req_inv, 2048);
@@ -686,19 +686,28 @@ void *recv_thread_fucntion(void *thread_arg)
 
     printf("\n RECV Thread %d Loop Started\n", thread_id);
     FILE *fp = fopen("trace_rtt.out", "w");
-    fprintf(fp, "rate_median,rate,rate_send,rtt\n");
+    fprintf(fp, "time, rate_recv, rate_send, rtt_app\n");
 
     double running_time;
     double start_time = 0;
+    double rate_diff = 0;
     struct timespec time;
+    long prev_rtt;
+    long rtt_diff = 0;
     clock_gettime(CLOCK_MONOTONIC, &time);
+    struct timeval val;
+    struct tm *ptm;
+    struct ethhdr *eth;
+    struct vlan_hdr *vlan;
+    struct iphdr *ip; 
+    struct lcchdr_ack *lcc;
 
     start_time = (double)time.tv_sec + (double)time.tv_nsec / (1000 * 1000 * 1000);
     while (1)
     {
         /* wait for completion */
-        //msgs_completed_recv = ibv_poll_cq(cq_recv, 1, &wc_recv);
-        msgs_completed_recv = ibv_exp_poll_cq(cq_recv, 1, &wc_exp_recv, sizeof(struct ibv_exp_wc));
+        msgs_completed_recv = ibv_poll_cq(cq_recv, 1, &wc_recv);
+        //msgs_completed_recv = ibv_exp_poll_cq(cq_recv, 1, &wc_exp_recv, sizeof(struct ibv_exp_wc));
         if (msgs_completed_recv > 0)
         {
             //printf("recv!\n");
@@ -710,73 +719,19 @@ void *recv_thread_fucntion(void *thread_arg)
              */
             g_total_recv += 1;
 
-            struct ethhdr *eth = (struct ethhdr *)((char *)buf_recv + wc_exp_recv.wr_id * ENTRY_SIZE);
-            struct vlan_hdr *vlan = (struct vlan_hdr *)(eth + 1);
-            struct iphdr *ip = (struct iphdr *)(vlan + 1);
-            struct lcchdr_ack *lcc = (struct lcchdr_ack *)(ip + 1);
+            eth = (struct ethhdr *)((char *)buf_recv + wc_recv.wr_id * ENTRY_SIZE);
+            vlan = (struct vlan_hdr *)(eth + 1);
+            ip = (struct iphdr *)(vlan + 1);
+            lcc = (struct lcchdr_ack *)(ip + 1);
             //If ack request is tagged
             if (lcc->ack == 1)
             {
                 time_now_app = g_time;
-                if (time_prev == 0)
-                {
-                    time_prev = lcc->ack_time;
-                    goto dequeue;
-                }
-
-                time_start = lcc->ack_time;
-                time_now_hw = ibv_exp_cqe_ts_to_ns(&values.clock_info, wc_exp_recv.timestamp);
-                if (time_start >= time_prev)
-                    time_taken = time_start - time_prev;
-                else
-                    time_taken = time_start + 1 * 1e9 - time_prev;
-
-                time_prev = time_start;
-                //printf("================================\n");
-
-                rate_curr = (double)8.0 * DATA_PACKET_SIZE * (lcc->seq - prev_seq) / time_taken;
-                rate_arry[arry_p] = rate_curr;
-                arry_p = (arry_p + 1) % 3;
-                g_recv_rate = rate_curr;// ;* 0.7 + g_recv_rate * 0.3; //find_median(rate_arry, arry_p); //rate_curr * 0.7 + g_recv_rate * 0.3;
-                //if (g_recv_rate == 0)
-                //    g_recv_rate = rate_curr;
-                //printf("%f: %f, %f, %f\n",g_recv_rate, rate_arry[0], rate_arry[1], rate_arry[2]);
-
-                if (g_lcc_mode)
-                {
-                    if (lcc->seq == 0 || g_recv_rate + 0.05 > g_send_rate)
-                    {
-                        // cnt_increase++;
-                        //cnt_increase = MIN(1, cnt_increase);
-                        g_send_rate += 0.05; //* cnt_increase * 0.05;//+ g_send_rate / 10 * 0.03;
-                        //printf("increase! %f\n",g_send_rate);
-                        cnt_decrease = 0;
-                    }
-                    else
-                    {
-                        fprintf(fp, "%f, %f, %d\n",rate_curr, g_send_rate, g_rtt_app );
-                        g_send_rate = g_send_rate * (1 - 0.1 *  g_rtt_app/10000); // 10); // - cnt_decrease * 0.1);
-                        cnt_decrease++;
-                        cnt_increase = 0;
-                        cnt_decrease = MIN(cnt_decrease, 6);
-                        //printf("decrease! %f\n",g_send_rate);
-                    }
-                    g_send_rate = MAX(0.2, g_send_rate);
-                    g_send_rate = MIN(9.6, g_send_rate);
-                    g_time_require = (double)DATA_PACKET_SIZE * 8.0 / (g_send_rate / NUM_SEND_THREAD);
-                }
-                rate_prev = rate_curr;
-            //printf("timestamp: %lu\n", wc_exp_recv.timestamp);
-            //if (prev_seq + g_ack_req_inv != lcc->seq)
-            //    printf("Drop detected!!\n");
-            dequeue:
-                prev_seq = lcc->seq;
 
                 if (ack_queue_head != ack_queue_tail)
                 {
                     seq = ack_queue[ack_queue_head].seq;
                     ack_time_app = ack_queue[ack_queue_head].ack_time_app;
-                    //ack_time_hw = ack_queue[ack_queue_head].ack_time_hw;
                     ack_queue_head = (ack_queue_head + 1) % ACK_QUEUE_LENGTH;
 
                     if (time_now_app >= ack_time_app)
@@ -789,27 +744,65 @@ void *recv_thread_fucntion(void *thread_arg)
                     else
                         g_rtt_hw = time_now_hw + 1 * 1e9 - ack_time_hw;
 
-                    //printf("\nrecv seq: %d \n", lcc->seq);
                     if (lcc->seq != seq)
                     {
                         printf("Drop detected!\nSEQ: %d\nNext SEQ: %d\nACK_INV: %d\n\n", lcc->seq, seq, g_ack_req_inv);
-                        //for (int i = ack_queue_head; i <= ack_queue_tail; i++)
-                        // {
-                        //     printf("SEQ: %d\n", ack_queue[i].seq);
-                        // }
-                        // exit(1);
-                        //printf("\n\n\n");
                     }
                 }
                 else
                 {
                     printf("Ack buffer full!!\n");
                 }
-                //clock_gettime(CLOCK_MONOTONIC, &time);
-                //running_time = (double)time.tv_sec + (double)time.tv_nsec / (1000 * 1000 * 1000) - start_time;
-                //find_median(rate_array, arry_p);
-                //fprintf(fp, "%ld, %ld, %ld\n", lcc->seq, g_rtt_app, g_rtt_hw);
-                //fflush(fp);
+
+                if (time_prev == 0)
+                {
+                    time_prev = lcc->ack_time;
+                    prev_seq = lcc->seq;
+                    prev_rtt = g_rtt_app;
+                    rate_prev = 1;
+                    continue;
+                }
+
+                time_start = lcc->ack_time;
+                time_now_hw = 0;//ibv_exp_cqe_ts_to_ns(&values.clock_info, wc_exp_recv.timestamp);
+                if (time_start >= time_prev)
+                    time_taken = time_start - time_prev;
+                else
+                    time_taken = time_start + 1 * 1e9 - time_prev;
+
+                rate_curr = (double)8.0 * DATA_PACKET_SIZE * (lcc->seq - prev_seq) / time_taken;
+                recv_data += DATA_PACKET_SIZE * (lcc->seq - prev_seq);
+                rate_arry[arry_p] = rate_curr;
+                arry_p = (arry_p + 1) % 3;
+                g_recv_rate = rate_curr;
+                rtt_diff = (g_rtt_app - prev_rtt);     //0.2 * rtt_diff + 0.8 * (g_rtt_app - prev_rtt);
+                rate_diff = (g_send_rate - rate_curr); // ;* 0.7 + g_recv_rate * 0.3; //find_median(rate_arry, arry_p); //rate_curr * 0.7 + g_recv_rate * 0.3;
+                //if (g_recv_rate == 0)
+                //    g_recv_rate = rate_curr;
+                //printf("%f: %f, %f, %f\n",g_recv_rate, rate_arry[0], rate_arry[1], rate_arry[2]);
+
+                if (g_lcc_mode)
+                {
+                    if (lcc->seq == 0 || g_recv_rate + 0.03 > g_send_rate || rtt_diff < 0)
+                    {
+                        g_send_rate += 0.05;
+                    }
+                    else
+                    {
+                        g_send_rate = g_send_rate * (1 - 0.8 * (double)rtt_diff / 50000);
+                    }
+                    g_send_rate = MAX(0.2, g_send_rate);
+                    g_send_rate = MIN(9.6, g_send_rate);
+                    g_time_require = (double)DATA_PACKET_SIZE * 8.0 / (g_send_rate / NUM_SEND_THREAD);
+                }
+                gettimeofday(&val, NULL);
+                ptm = localtime(&val.tv_sec);
+                fprintf(fp, "%02d%02d%02d.%06ld, %f, %f ,%d\n", ptm->tm_hour, ptm->tm_min, ptm->tm_sec, val.tv_usec, g_recv_rate, g_send_rate, g_rtt_app);
+
+                rate_prev = rate_curr;
+                time_prev = lcc->ack_time;
+                prev_seq = lcc->seq;
+                prev_rtt = g_rtt_app;
             }
 
             ibv_post_recv(qp, &wr_recv[wc_recv.wr_id], &bad_wr_recv);
@@ -1089,6 +1082,10 @@ int main()
 
     fp = fopen("trace.out", "w");
     fprintf(fp, "time, recv_rate, send_rate, rtt_app, rtt_hw, ack_queue_len\n");
+
+    FILE *fp2 = fopen("trace2.out", "w");
+    fprintf(fp2, "time, throughput\n");
+    fflush(fp2);
     struct timespec time;
     clock_gettime(CLOCK_MONOTONIC, &time);
     double start_time = (double)time.tv_sec + (double)time.tv_nsec / (1000 * 1000 * 1000);
@@ -1103,18 +1100,17 @@ int main()
         ptm = localtime(&val.tv_sec);
 
         if (g_recv_rate > 0)
-            fprintf(fp, "%02d%02d%02d.%06ld, %f, %f, %ld, %ld ,%d, %d\n", ptm->tm_hour, ptm->tm_min, ptm->tm_sec, val.tv_usec, g_recv_rate, g_send_rate, g_rtt_app, g_rtt_hw, ack_queue_tail - ack_queue_head, g_ack_req_inv);
-        sleep_cnt++;
+        {
+            //fprintf(fp, "%02d%02d%02d.%06ld, %f, %f, %ld, %ld ,%d, %d\n", ptm->tm_hour, ptm->tm_min, ptm->tm_sec, val.tv_usec, g_recv_rate, g_send_rate, g_rtt_app, g_rtt_hw, ack_queue_tail - ack_queue_head);
+            sleep_cnt++;
+        }
         if (sleep_cnt > 10000)
         {
-            printf("%02d%02d%02d.%06ld, %f, %f, %ld, %ld, %d, %d\n", ptm->tm_hour, ptm->tm_min, ptm->tm_sec, val.tv_usec, g_recv_rate, g_send_rate, g_rtt_app, g_rtt_hw, ack_queue_tail - ack_queue_head, g_ack_req_inv);
+            //fprintf(fp2, "%02d%02d%02d.%06ld, %f\n", ptm->tm_hour, ptm->tm_min, ptm->tm_sec, val.tv_usec, (double)8 * recv_data / (10000 * 10));
+            printf("%02d%02d%02d.%06ld, %f, %f, %ld, %ld\n", ptm->tm_hour, ptm->tm_min, ptm->tm_sec, val.tv_usec, g_recv_rate, g_send_rate, g_rtt_app, g_ack_req_inv);
             sleep_cnt = 0;
+            recv_data = 0;
+            fflush(fp2);
         }
     }
-
-    fclose(fp);
-
-    printf("We are done \n");
-
-    return 0;
 }

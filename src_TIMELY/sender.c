@@ -321,7 +321,7 @@ void *send_thread_fucntion(void *thread_arg)
     int ack_tag = g_ack_req_inv - 1;
     g_time_require = (double)DATA_PACKET_SIZE * 8.0 * 16 / (g_init_rate / NUM_SEND_THREAD);
     g_prev_rate = g_init_rate;
-    g_send_rate = g_init_rate;
+    g_send_rate = g_init_rate; 
 
     time_prev = g_time;
 
@@ -610,7 +610,7 @@ void *recv_thread_fucntion(void *thread_arg)
     //RECV procedure Loop
     printf("\n RECV Thread %d Loop Started\n", thread_id);
     FILE *fp = fopen("trace_rtt.out", "w");
-    fprintf(fp, "rate_median,rate,rate_send,rtt\n");
+    fprintf(fp, "time, rate_recv, rate_send, rtt_app\n");
 
     double running_time;
     double start_time = 0;
@@ -623,6 +623,8 @@ void *recv_thread_fucntion(void *thread_arg)
     long prev_rtt = 0;
     char *updaterule;
     int mN = 0;
+    struct timeval val;
+    struct tm *ptm;
     start_time = (double)time.tv_sec + (double)time.tv_nsec / (1000 * 1000 * 1000);
     while (1)
     {
@@ -671,24 +673,6 @@ void *recv_thread_fucntion(void *thread_arg)
                 //    g_recv_rate = rate_curr;
                 //printf("%f: %f, %f, %f\n",g_recv_rate, rate_arry[0], rate_arry[1], rate_arry[2]);
 
-                if (g_lcc_mode)
-                {
-                    if (lcc->seq == 0 || g_recv_rate + 0.15 > g_send_rate)
-                    {
-                        g_send_rate += 0.05; // + g_send_rate / 10 * 0.02;
-                        //printf("increase! %f\n",g_send_rate);
-                        cnt_decrease = 1;
-                    }
-                    else
-                    {
-                        g_send_rate = g_recv_rate * 0.85; // * (1 - cnt_decrease * 0.1);
-                        cnt_decrease++;
-                        cnt_decrease = MIN(cnt_decrease, 10);
-                        //printf("decrease! %f\n",g_send_rate);
-                    }
-                    g_time_require = (double)DATA_PACKET_SIZE * 8.0 / (g_send_rate / NUM_SEND_THREAD);
-                }
-
             dequeue:
                 prev_seq = lcc->seq;
 
@@ -721,45 +705,46 @@ void *recv_thread_fucntion(void *thread_arg)
                         //printf("\n\n\n");
                     }
 
-                    if (g_timely_mode)
-                    {
-                        new_rtt_diff = g_rtt_app - prev_rtt;
-                        rtt_diff = (1 - 0.8) * rtt_diff + 0.8 * new_rtt_diff;
-                        normalized_gradiant = (double) rtt_diff / (100.0 * 1000.0); //min_rtt;
-                        g_normalize_gradient =normalized_gradiant;
+                    new_rtt_diff = g_rtt_app - prev_rtt;
+                    rtt_diff = (1 - 0.8) * rtt_diff + 0.8 * new_rtt_diff;
+                    normalized_gradiant = (double)rtt_diff / (100.0 * 1000.0); //min_rtt; 
+                    g_normalize_gradient = normalized_gradiant;
 
-                        if (g_rtt_app < 30 * 1000 /*m_t_low*/) 
-                        {
-                            mN++;
-                            updaterule = "t_low";
-                            g_send_rate += 0.01; //m_newRate = m_rate + m_delta;
-                        }
-                        else if (g_rtt_app > 500 * 1000) //m_t_high)
-                        {
-                            updaterule = "t_high";
-                            g_send_rate = g_send_rate * (1 - 0.8 * (1 - 500 * 1000 / g_rtt_app)); //m_newRate = m_rate * (1 - m_beta * (1 - m_t_high / m_new_rtt));
-                        }
-                        else if (normalized_gradiant < 0)
-                        {
-                            mN++;
-                            updaterule = "negative_grad";
-                            if (mN > 4)
-                                g_send_rate += 5 * 0.01; //  m_newRate = m_rate + m_N * m_delta;
-                            else
-                                g_send_rate += 0.01;
-                        }
-                        else
-                        {
-                            mN = 0;
-                            updaterule = "pos_grad";
-                            g_send_rate = g_send_rate * (1 - 0.8 * normalized_gradiant); //m_newRate = m_rate * (1 - m_beta * normalized_gradiant);
-                        }
-                        g_send_rate = MAX(0.2, g_send_rate);
-                        g_send_rate = MIN(9.9, g_send_rate);
-                        g_time_require = (double)DATA_PACKET_SIZE * 8.0 * 16 / (g_send_rate / NUM_SEND_THREAD);
-                        prev_rtt = g_rtt_app;
-                        // printf("rule : %s\n", updaterule);
+                    if (g_rtt_app < 40 * 1000 /*m_t_low*/)
+                    {
+                        mN++;
+                        updaterule = "t_low";
+                        g_send_rate += 0.01; //m_newRate = m_rate + m_delta;
                     }
+                    else if (g_rtt_app > 500 * 1000) //m_t_high)
+                    {
+                        updaterule = "t_high";
+                        g_send_rate = g_send_rate * (1 - 0.8 * (1 - 500 * 1000 / g_rtt_app)); //m_newRate = m_rate * (1 - m_beta * (1 - m_t_high / m_new_rtt));
+                    }
+                    else if (normalized_gradiant < 0)
+                    {
+                        mN++;
+                        updaterule = "negative_grad";
+                        if (mN > 4)
+                            g_send_rate += 5 * 0.01; //  m_newRate = m_rate + m_N * m_delta;
+                        else
+                            g_send_rate += 0.01;
+                    }
+                    else
+                    {
+                        mN = 0;
+                        updaterule = "pos_grad";
+                        g_send_rate = g_send_rate * (1 - 0.8 * normalized_gradiant); //m_newRate = m_rate * (1 - m_beta * normalized_gradiant);
+                    }
+                    g_send_rate = MAX(0.2, g_send_rate);
+                    g_send_rate = MIN(9.5, g_send_rate);
+                    gettimeofday(&val, NULL);
+                    ptm = localtime(&val.tv_sec);
+                    fprintf(fp, "%02d%02d%02d.%06ld, %f, %f ,%d\n", ptm->tm_hour, ptm->tm_min, ptm->tm_sec, val.tv_usec, g_recv_rate, g_send_rate, g_rtt_app);
+
+                    g_time_require = (double)DATA_PACKET_SIZE * 8.0 * 16 / (g_send_rate / NUM_SEND_THREAD);
+                    prev_rtt = g_rtt_app;
+                    // printf("rule : %s\n", updaterule);
                 }
                 else
                 {
@@ -968,15 +953,6 @@ int main()
                 strcpy(varBuff, strrchr(readBuff, '=') + 1);
                 sscanf(varBuff, "%lf", &g_init_rate);
                 printf("\n INIT_RATE : %f", g_init_rate);
-            }
-            if (strncasecmp(readBuff, "LCC_MODE", strlen("LCC_MODE")) == 0)
-            {
-                strcpy(varBuff, strrchr(readBuff, '=') + 1);
-                if (strncasecmp(varBuff, "ON", strlen("ON")) == 0)
-                    g_lcc_mode = true;
-                else if (strncasecmp(varBuff, "OFF", strlen("OFF")) == 0)
-                    g_lcc_mode = false;
-                printf("\n LCC_MODE : %d", g_lcc_mode);
             }
         }
     }

@@ -164,7 +164,7 @@ static uint16_t gen_ip_checksum(const char *buf, int num_bytes)
 
 void *ack_thread_function()
 {
-    
+
     unsigned long mask = 4;
     if (pthread_setaffinity_np(pthread_self(), sizeof(mask), (cpu_set_t *)&mask))
     {
@@ -359,18 +359,19 @@ void *ack_thread_function()
     uint32_t seq, ack_time;
     struct ack_queue_items queue_item;
     uint8_t client_ip[4];
+    do
+    {
+        msgs_completed_send = ibv_poll_cq(cq_send, 1, &wc_send);
+    } while (msgs_completed_send == 0);
+
     while (1)
     {
         if (ack_queue_head != ack_queue_tail)
         {
             seq = ack_queue[ack_queue_head].seq;
             ack_time = ack_queue[ack_queue_head].ack_time;
-            memcpy(client_ip,ack_queue[ack_queue_head].client_ip,4);
+            memcpy(client_ip, ack_queue[ack_queue_head].client_ip, 4);
             ack_queue_head = (ack_queue_head + 1) % ACK_QUEUE_LENGTH;
-            do
-            {
-                msgs_completed_send = ibv_poll_cq(cq_send, 1, &wc_send);
-            } while (msgs_completed_send == 0);
 
             create_ack_packet(buf_send + wc_send.wr_id * ENTRY_SIZE, seq, ack_time, client_ip);
             create_send_work_request(wr_send + wc_send.wr_id, sg_entry_send + wc_send.wr_id, mr_send, buf_send + wc_send.wr_id * ENTRY_SIZE, wc_send.wr_id, ACK);
@@ -380,6 +381,10 @@ void *ack_thread_function()
                 fprintf(stderr, "failed in post send\n");
                 exit(1);
             }
+            do
+            {
+                msgs_completed_send = ibv_poll_cq(cq_send, 1, &wc_send);
+            } while (msgs_completed_send == 0);
         }
     }
 }
@@ -601,7 +606,9 @@ void *recv_thread_function(void *thread_arg)
              * -index of descriptor completing
              * -size of the incoming packets
              */
+            pthread_mutex_lock(&mutex_g_recv_data);
             g_total_recv += wc_exp_recv.byte_len;
+            pthread_mutex_unlock(&mutex_g_recv_data);
             struct ethhdr *eth = (struct ethhdr *)((char *)buf_recv + wc_exp_recv.wr_id * ENTRY_SIZE);
             struct vlan_hdr *vlan = (struct vlan_hdr *)(eth + 1);
             struct iphdr *ip = (struct iphdr *)(vlan + 1);
@@ -610,7 +617,7 @@ void *recv_thread_function(void *thread_arg)
             //If ack request is tagged
             if (lcc->ackReq == 1)
             {
-                        //printf("recv seq: %d\n", lcc->seq);
+                //printf("recv seq: %d\n", lcc->seq);
 
                 if ((ack_queue_tail + 1) % ACK_QUEUE_LENGTH == ack_queue_head)
                 {
@@ -619,7 +626,7 @@ void *recv_thread_function(void *thread_arg)
                 }
                 ack_queue[ack_queue_tail].seq = lcc->seq;
                 ack_queue[ack_queue_tail].ack_time = ibv_exp_cqe_ts_to_ns(&values.clock_info, wc_exp_recv.timestamp);
-                memcpy(&ack_queue[ack_queue_tail].client_ip, &ip->saddr,4);
+                memcpy(&ack_queue[ack_queue_tail].client_ip, &ip->saddr, 4);
                 ack_queue_tail = (ack_queue_tail + 1) % ACK_QUEUE_LENGTH;
             }
 
@@ -629,12 +636,12 @@ void *recv_thread_function(void *thread_arg)
             //    printf("Current SEQ :  %d\n", lcc->seq);
             //    printf("Previous SEQ :  %d\n", g_recv_seq);
             //    g_seq_revert++;
-            //    if (g_seq_revert > 100)
-            //    {
-                    //printf("\nERROR: Too many packet loss over 100!!!\n");
-                    //exit(1);
-            //    }
-           //}
+                //    if (g_seq_revert > 100)
+                //    {
+                //printf("\nERROR: Too many packet loss over 100!!!\n");
+                //exit(1);
+                //    }
+            //}
             g_recv_seq = lcc->seq;
             ibv_post_recv(qp, &wr_recv[wc_exp_recv.wr_id], &bad_wr_recv);
         }
@@ -707,17 +714,33 @@ int main()
         thread_arg[i].thread_action = SENDING_AND_RECEVING;
         pthread_create(&p_thread[i], NULL, recv_thread_function, (void *)(thread_arg + i));
     }
-    double time_require = 0.1;
+    double time_require = 10;
     struct timespec start, previous;
     previous.tv_sec = 0;
     previous.tv_nsec = 0;
     double time_taken = -1;
+    struct timeval val;
+    FILE *fp = fopen("trace_recv.out", "w");
+    int cnt = 0;
+    struct tm *ptm;
     while (1)
     {
-
-        usleep(time_require*1000*1000);
-        printf("Bandwidth : %2.5f\n", g_total_recv * 8 / (time_require * 1000 * 1000 * 1000));
-        g_total_recv = 0;
+        gettimeofday(&val, NULL);
+        ptm = localtime(&val.tv_sec);
+        usleep(time_require * 1000);
+        if (g_total_recv > 0)
+        {
+            fprintf(fp, "%02d%02d%02d.%06ld, %f\n", ptm->tm_hour, ptm->tm_min, ptm->tm_sec, val.tv_usec, g_total_recv * 8 / (time_require * 1000 * 1000));
+            cnt++;
+            if (cnt > 100)
+            {
+                printf("Bandwidth : %2.5f\n", g_total_recv * 8 / (time_require * 1000 * 1000));
+                cnt = 0;
+            }
+            pthread_mutex_lock(&mutex_g_recv_data);
+            g_total_recv = 0;
+            pthread_mutex_unlock(&mutex_g_recv_data);
+        }
     }
 
     printf("We are done\n");
