@@ -737,7 +737,7 @@ void *recv_thread_fucntion(void *thread_arg)
                         g_send_rate = g_send_rate * (1 - 0.8 * normalized_gradiant); //m_newRate = m_rate * (1 - m_beta * normalized_gradiant);
                     }
                     g_send_rate = MAX(0.2, g_send_rate);
-                    g_send_rate = MIN(9.5, g_send_rate);
+                    g_send_rate = MIN(40, g_send_rate);
                     gettimeofday(&val, NULL);
                     ptm = localtime(&val.tv_sec);
                     fprintf(fp, "%02d%02d%02d.%06ld, %f, %f ,%d\n", ptm->tm_hour, ptm->tm_min, ptm->tm_sec, val.tv_usec, g_recv_rate, g_send_rate, g_rtt_app);

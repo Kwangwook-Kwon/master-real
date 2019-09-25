@@ -16,11 +16,11 @@
 #define SQ_NUM_DESC 1024/* maximum number of sends waiting for completion */
 #define RQ_NUM_DESC 2048
 #define NUM_SEND_THREAD 1
-#define DATA_PACKET_SIZE 1000
+#define DATA_PACKET_SIZE 1000 
 #define TOTAL_TRANSMIT_DATA -1
 #define SEND_BUCKET_LIMIT 33000
 #define ACK_QUEUE_LENGTH 50000
-#define DATA_QUEUE_LENGTH 1030
+#define DATA_QUEUE_LENGTH 2000
 
 /* template of packet to send */
 #define PAUSE_ETH_DST_ADDR 0x01, 0x80, 0xC2, 0x00, 0x00, 0x01
@@ -124,7 +124,8 @@ static struct Data_queue data_queue[DATA_QUEUE_LENGTH];
 static struct Data_allow_queue data_allow_queue[DATA_QUEUE_LENGTH];
 static void *buf_send;
 static int recv_data;
-
+static double g_rate_diff_grad;
+static double g_rate_diff;
 pthread_mutex_t mutex_sender_thread;
 
 
@@ -133,7 +134,7 @@ void create_send_work_request(struct ibv_send_wr *, struct ibv_sge *, struct ibv
 void create_recv_work_request(struct ibv_qp *, struct ibv_recv_wr *, struct ibv_sge *, struct ibv_mr *, void *, struct raw_eth_flow_attr *);
 void *send_thread_fucntion(void *Thread_arg);
 void *recv_thread_fucntion(void *Thread_arg);
-void *make_packet_function(void *thread_arg);
+void *flow_make_packet(void *thread_arg);
 void *clock_thread_function();
 double find_median(double *rate_array, int arry_p);
 void swap(double *a, double *b);

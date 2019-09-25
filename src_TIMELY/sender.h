@@ -16,7 +16,7 @@
 #define SQ_NUM_DESC 2048/* maximum number of sends waiting for completion */
 #define RQ_NUM_DESC 2048
 #define NUM_SEND_THREAD 1
-#define DATA_PACKET_SIZE 1000
+#define DATA_PACKET_SIZE 4000
 #define TOTAL_TRANSMIT_DATA -1
 #define SEND_BUCKET_LIMIT 33000
 #define ACK_QUEUE_LENGTH 50000
