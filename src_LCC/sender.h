@@ -13,14 +13,14 @@
 
 #define PORT_NUM 1
 #define ENTRY_SIZE 9000  /* maximum size of each send buffer */
-#define SQ_NUM_DESC 1024/* maximum number of sends waiting for completion */
+#define SQ_NUM_DESC 2048/* maximum number of sends waiting for completion */
 #define RQ_NUM_DESC 2048
 #define NUM_SEND_THREAD 1
 #define DATA_PACKET_SIZE 1000 
 #define TOTAL_TRANSMIT_DATA -1
 #define SEND_BUCKET_LIMIT 33000
 #define ACK_QUEUE_LENGTH 50000
-#define DATA_QUEUE_LENGTH 2000
+#define DATA_QUEUE_LENGTH 50000
 
 /* template of packet to send */
 #define PAUSE_ETH_DST_ADDR 0x01, 0x80, 0xC2, 0x00, 0x00, 0x01
@@ -45,6 +45,12 @@ enum Thread_action
     SENDING_AND_RECEVING,
     SENDING_ONLY,
     RECEIVING_ONLY
+};
+
+enum Oper_mode
+{
+    LCC,
+    TIMELY
 };
 
 enum Packet_type
@@ -126,7 +132,9 @@ static void *buf_send;
 static int recv_data;
 static double g_rate_diff_grad;
 static double g_rate_diff;
+static double g_normalize_gradient;
 pthread_mutex_t mutex_sender_thread;
+static enum Oper_mode g_oper_mode;
 
 
 void create_data_packet(void *buf, bool ack);
