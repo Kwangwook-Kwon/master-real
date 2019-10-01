@@ -164,7 +164,7 @@ void create_send_work_request(struct ibv_send_wr *wr, struct ibv_sge *sg_entry, 
     else if (packet_type == ACK)
         sg_entry->length = ACK_PACKET_SIZE;
     else if (packet_type == DUMMY)
-        sg_entry->length = 0;
+        sg_entry->length = 60;
     sg_entry->lkey = mr->lkey;
     memset(wr, 0, sizeof(struct ibv_send_wr));
 
@@ -395,7 +395,6 @@ void *send_packet(void *thread_arg)
             struct vlan_hdr *vlan = (struct vlan_hdr *)(eth + 1);
             struct iphdr *ip = (struct iphdr *)(vlan + 1);
             struct lcchdr_ack *lcc = (struct lcchdr_ack *)(ip + 1);
-            printf("seq: %d\n",lcc->seq);
             wr_id = data_queue[data_queue_head].wr_id;
 
             create_send_work_request(wr_send + wr_id, sg_entry_send + wr_id, mr_send, data_queue[data_queue_head].buf, wr_id, DATA);
