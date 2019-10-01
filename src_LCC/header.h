@@ -65,7 +65,8 @@ struct lcchdr
         uint16_t ackReq : 1, /* is ACK request? */
             ack : 1,          /* is ACK? */
             data : 1,         /* is DATA? */
-            reserve : 13;
+            endofdata: 1,
+            reserve : 12;
         uint32_t seq;
 };
 
@@ -91,7 +92,8 @@ struct lcchdr_ack
         uint16_t ackReq : 1, /* is ACK request? */
             ack : 1,          /* is ACK? */
             data : 1,         /* is DATA? */
-            reserve : 13;
+            endofdata: 1,
+            reserve : 12;
         uint32_t seq;
         uint32_t ack_time;
 };

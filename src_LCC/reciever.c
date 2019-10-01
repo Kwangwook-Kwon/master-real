@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include <infiniband/verbs.h>
 #include <infiniband/verbs_exp.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <unistd.h>
 #include <string.h>
@@ -14,23 +15,18 @@
 #include "header.h"
 #include "receiver.h"
 
-void create_ack_packet(void *buf, uint32_t seq, uint32_t ack_time, uint8_t *client_ip)
+void create_ack_packet(void *buf, uint32_t seq, uint32_t ack_time, uint8_t *client_ip, bool endofdata)
 {
 
-    unsigned long mask = 8;
-    if (pthread_setaffinity_np(pthread_self(), sizeof(mask), (cpu_set_t *)&mask))
-    {
-        fprintf(stderr, "Couldn't allocate thread cpu \n");
-    }
     // Ether header
     struct ethhdr *eth = (struct ethhdr *)buf;
     memcpy(eth->h_dest, g_dst_mac_addr, ETH_ALEN);
-    memcpy(eth->h_source, g_src_mac_addr, ETH_ALEN);
+    memcpy(eth->h_source, g_recv_mac_addr, ETH_ALEN);
     eth->h_proto = htons(ETH_P_8021Q);
 
     //VLAN header
     struct vlan_hdr *vlan = (struct vlan_hdr *)(eth + 1);
-    memcpy(&vlan->h_vlan_TCI, g_vlan_hdr, 2);
+    vlan->h_vlan_TCI = htons(g_vlan_hdr_ack);
     vlan->h_vlan_encapsulated_proto = htons(ETH_P_IP);
 
     //IP header
@@ -45,7 +41,7 @@ void create_ack_packet(void *buf, uint32_t seq, uint32_t ack_time, uint8_t *clie
     ip->ttl = 64;
     ip->protocol = IPPROTO_UDP;
     ip->check = 0;
-    memcpy(&ip->saddr, g_src_ip, 4);
+    memcpy(&ip->saddr, g_recv_ip, 4);
     memcpy(&ip->daddr, client_ip, 4);
     ip->check = gen_ip_checksum((char *)ip, sizeof(struct iphdr));
 
@@ -60,14 +56,7 @@ void create_ack_packet(void *buf, uint32_t seq, uint32_t ack_time, uint8_t *clie
     lcc->ack = 1;
     lcc->seq = seq;
     lcc->ack_time = ack_time;
-    //g_send_seq++;
-    //if (g_send_seq % 8 == 0)
-    //    lcc->ackReq = 1;
-
-    // Payload : Data150
-    //void *payload = lcc + 1;
-    //char D = 'D';
-    //memset(payload, D, lcc_len - sizeof(struct lcchdr));
+    lcc->endofdata = endofdata;
 }
 
 void create_dummy_packet(void *buf)
@@ -165,7 +154,7 @@ static uint16_t gen_ip_checksum(const char *buf, int num_bytes)
 void *ack_thread_function()
 {
 
-    unsigned long mask = 4;
+    unsigned long mask = 1;
     if (pthread_setaffinity_np(pthread_self(), sizeof(mask), (cpu_set_t *)&mask))
     {
         fprintf(stderr, "Couldn't allocate thread cpu \n");
@@ -359,6 +348,7 @@ void *ack_thread_function()
     uint32_t seq, ack_time;
     struct ack_queue_items queue_item;
     uint8_t client_ip[4];
+    bool endofdata;
     do
     {
         msgs_completed_send = ibv_poll_cq(cq_send, 1, &wc_send);
@@ -368,12 +358,14 @@ void *ack_thread_function()
     {
         if (ack_queue_head != ack_queue_tail)
         {
+            endofdata = ack_queue[ack_queue_head].endofdata;
             seq = ack_queue[ack_queue_head].seq;
             ack_time = ack_queue[ack_queue_head].ack_time;
             memcpy(client_ip, ack_queue[ack_queue_head].client_ip, 4);
             ack_queue_head = (ack_queue_head + 1) % ACK_QUEUE_LENGTH;
 
-            create_ack_packet(buf_send + wc_send.wr_id * ENTRY_SIZE, seq, ack_time, client_ip);
+
+            create_ack_packet(buf_send + wc_send.wr_id * ENTRY_SIZE, seq, ack_time, client_ip, endofdata);
             create_send_work_request(wr_send + wc_send.wr_id, sg_entry_send + wc_send.wr_id, mr_send, buf_send + wc_send.wr_id * ENTRY_SIZE, wc_send.wr_id, ACK);
             ret = ibv_post_send(qp, wr_send + wc_send.wr_id, &bad_wr_send);
             if (ret < 0)
@@ -565,7 +557,12 @@ void *recv_thread_function(void *thread_arg)
             .flags = 0,
         },
         .spec_eth = {.type = IBV_EXP_FLOW_SPEC_ETH, .size = sizeof(struct ibv_flow_spec_eth), .val = {
-                                                                                                  .dst_mac = DST_MAC_RECV,
+                                                                                                  .dst_mac[0] = g_recv_mac_addr[0],
+                                                                                                  .dst_mac[1] = g_recv_mac_addr[1],
+                                                                                                  .dst_mac[2] = g_recv_mac_addr[2],
+                                                                                                  .dst_mac[3] = g_recv_mac_addr[3],
+                                                                                                  .dst_mac[4] = g_recv_mac_addr[4],
+                                                                                                  .dst_mac[5] = g_recv_mac_addr[5],
                                                                                                   .src_mac = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
                                                                                                   .ether_type = 0,
                                                                                                   .vlan_tag = 0,
@@ -593,6 +590,7 @@ void *recv_thread_function(void *thread_arg)
     struct ibv_wc wc_recv, wc_send;
     struct ibv_exp_wc wc_exp_recv;
     unsigned char *output;
+    int flow_id = 0;
     while (1)
     {
 
@@ -607,41 +605,29 @@ void *recv_thread_function(void *thread_arg)
              * -size of the incoming packets
              */
             pthread_mutex_lock(&mutex_g_recv_data);
-            g_total_recv += wc_exp_recv.byte_len;
             pthread_mutex_unlock(&mutex_g_recv_data);
             struct ethhdr *eth = (struct ethhdr *)((char *)buf_recv + wc_exp_recv.wr_id * ENTRY_SIZE);
             struct vlan_hdr *vlan = (struct vlan_hdr *)(eth + 1);
             struct iphdr *ip = (struct iphdr *)(vlan + 1);
             struct lcchdr *lcc = (struct lcchdr *)(ip + 1);
-            //printf("recv seq: %d\n", lcc->seq);
+            //printf("recved: %d\n", lcc->seq);
+            //g_total_recv += wc_exp_recv.byte_len - sizeof(struct ethhdr) - sizeof(struct vlan_hdr) - sizeof(struct iphdr)- sizeof(struct lcchdr);
+
             //If ack request is tagged
             if (lcc->ackReq == 1)
             {
-                //printf("recv seq: %d\n", lcc->seq);
 
                 if ((ack_queue_tail + 1) % ACK_QUEUE_LENGTH == ack_queue_head)
                 {
                     printf("ERROR: ACK queue is full!!\n");
                     exit(1);
-                }
+                }               
+                ack_queue[ack_queue_tail].endofdata = lcc->endofdata;
                 ack_queue[ack_queue_tail].seq = lcc->seq;
                 ack_queue[ack_queue_tail].ack_time = ibv_exp_cqe_ts_to_ns(&values.clock_info, wc_exp_recv.timestamp);
                 memcpy(&ack_queue[ack_queue_tail].client_ip, &ip->saddr, 4);
                 ack_queue_tail = (ack_queue_tail + 1) % ACK_QUEUE_LENGTH;
             }
-
-            //if (lcc->seq - g_recv_seq != 1 && g_recv_seq - lcc->seq != 4294967295)
-            //{
-            //    printf("Packet Loss Detected!!!!\n");
-            //    printf("Current SEQ :  %d\n", lcc->seq);
-            //    printf("Previous SEQ :  %d\n", g_recv_seq);
-            //    g_seq_revert++;
-                //    if (g_seq_revert > 100)
-                //    {
-                //printf("\nERROR: Too many packet loss over 100!!!\n");
-                //exit(1);
-                //    }
-            //}
             g_recv_seq = lcc->seq;
             ibv_post_recv(qp, &wr_recv[wc_exp_recv.wr_id], &bad_wr_recv);
         }
@@ -656,11 +642,64 @@ void *recv_thread_function(void *thread_arg)
 int main()
 {
 
-    unsigned long mask = 1;
-    if (pthread_setaffinity_np(pthread_self(), sizeof(mask), (cpu_set_t *)&mask))
+    char readBuff[512];
+    char varBuff[256];
+
+    FILE *fp;
+
+    memset(varBuff, 0, 256);
+    printf("\n Readming Conf file...\n\n");
+    fp = fopen("lcc.conf", "r");
+    if (fp)
     {
-        fprintf(stderr, "Couldn't allocate thread cpu \n");
+        while (!feof(fp))
+        {
+            memset(readBuff, 0, 512);
+
+            if (fgets(readBuff, 512, fp) == NULL)
+            {
+                continue;
+            }
+            if (strncasecmp(readBuff, "#", strlen("#")) == 0)
+            {
+                continue;
+            }
+            if (strncasecmp(readBuff, "VLAN_ID", strlen("VLAN_ID")) == 0)
+            {
+
+                strcpy(varBuff, strrchr(readBuff, '=') + 1);
+                sscanf(varBuff, "%hd", &g_vlan_id);
+                printf(" VLAN_ID : %d", g_vlan_id);
+                g_vlan_hdr_ack = g_vlan_id;
+            }
+            if (strncasecmp(readBuff, "RECV_MAC", strlen("RECV_MAC")) == 0)
+            {
+
+                strcpy(varBuff, strrchr(readBuff, '=') + 1);
+                sscanf(varBuff, "%hhX:%hhX:%hhX:%hhX:%hhX:%hhX",
+                       &g_recv_mac_addr[0], &g_recv_mac_addr[1], &g_recv_mac_addr[2],
+                       &g_recv_mac_addr[3], &g_recv_mac_addr[4], &g_recv_mac_addr[5]);
+            }
+            if (strncasecmp(readBuff, "RECV_IP", strlen("RECV_IP")) == 0)
+            {
+
+                strcpy(varBuff, strrchr(readBuff, '=') + 1);
+                sscanf(varBuff, "%hhd.%hhd.%hhd.%hhd",
+                       &g_recv_ip[0], &g_recv_ip[1], &g_recv_ip[2], &g_recv_ip[3]);
+            }
+            if (strncasecmp(readBuff, "DST_MAC", strlen("DST_MAC")) == 0)
+            {
+
+                strcpy(varBuff, strrchr(readBuff, '=') + 1);
+                sscanf(varBuff, "%hhX:%hhX:%hhX:%hhX:%hhX:%hhX",
+                       &g_dst_mac_addr[0], &g_dst_mac_addr[1], &g_dst_mac_addr[2],
+                       &g_dst_mac_addr[3], &g_dst_mac_addr[4], &g_dst_mac_addr[5]);
+            }
+        }
     }
+    printf("\n\n Read End...\n\n");
+
+    fclose(fp);
 
     int ret;
 
@@ -720,12 +759,12 @@ int main()
     previous.tv_nsec = 0;
     double time_taken = -1;
     struct timeval val;
-    FILE *fp = fopen("trace_recv.out", "w");
+    fp = fopen("trace_recv.out", "w");
     int cnt = 0;
     struct tm *ptm;
     while (1)
     {
-        gettimeofday(&val, NULL);
+        /*gettimeofday(&val, NULL);
         ptm = localtime(&val.tv_sec);
         usleep(time_require * 1000);
         if (g_total_recv > 0)
@@ -740,7 +779,8 @@ int main()
             pthread_mutex_lock(&mutex_g_recv_data);
             g_total_recv = 0;
             pthread_mutex_unlock(&mutex_g_recv_data);
-        }
+        }*/
+        sleep(100);
     }
 
     printf("We are done\n");

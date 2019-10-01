@@ -11,14 +11,18 @@
 #include <netinet/ip.h>
 #include <netinet/udp.h>
 
+
 #define PORT_NUM 1
-#define ENTRY_SIZE 9000  /* maximum size of each send buffer */
-#define SQ_NUM_DESC 2048/* maximum number of sends waiting for completion */
-#define RQ_NUM_DESC 2048
-#define NUM_SEND_THREAD 1
+#define ENTRY_SIZE 1100  /* maximum size of each send buffer */
+#define SQ_NUM_DESC 9081/* maximum number of sends waiting for completion */
+#define RQ_NUM_DESC 9081
+#define NUM_SEND_THREAD 1 
 #define DATA_PACKET_SIZE 1000 
+#define ACK_PACKET_SIZE 60
+
 #define TOTAL_TRANSMIT_DATA -1
 #define SEND_BUCKET_LIMIT 33000
+#define SENT_QUEUE_LENGTH 50000
 #define ACK_QUEUE_LENGTH 50000
 #define DATA_QUEUE_LENGTH 50000
 
@@ -29,6 +33,8 @@
 
 #define UDP_SRC 12357
 #define UDP_DST 0xb711
+
+#define INPUT_CDF_FILE "workload/workload_mining.tcl"
 
 #define MAX(a,b)\
 ({ __typeof__ (a) _a = (a);\
@@ -47,10 +53,18 @@ enum Thread_action
     RECEIVING_ONLY
 };
 
-enum Oper_mode
+enum CC_mode
 {
     LCC,
-    TIMELY
+    TIMELY,
+    STREAM,
+    RECV
+};
+
+enum Flow_mode
+{
+    INFINITE,
+    DYNAMIC
 };
 
 enum Packet_type
@@ -71,15 +85,17 @@ struct Thread_arg
     enum Thread_action thread_action;
 };
 
-struct Ack_queue
+struct Sent_queue
 {
+    bool endofdata;
     long ack_time_app;
     uint32_t ack_time_hw;
     uint32_t seq;
 };
 
+
 struct Data_queue
-{
+{   
     void *buf;
     int wr_id;
 };
@@ -101,12 +117,18 @@ uint64_t buf_size_recv = ENTRY_SIZE * RQ_NUM_DESC; /* maximum size of data to be
 
 static uint8_t g_dst_mac_addr[ETH_ALEN];// = {DST_MAC};
 static uint8_t g_src_mac_addr[ETH_ALEN];// = {SRC_MAC};
+static uint8_t g_recv_mac_addr[ETH_ALEN];// = {SRC_MAC};
 static uint8_t g_brd_mac_addr[ETH_ALEN] = {BRD_MAC};
 static uint8_t g_eth_pause_addr[ETH_ALEN] = {PAUSE_ETH_DST_ADDR};
 static uint8_t g_dst_ip[4];// = {DST_IP};
 static uint8_t g_src_ip[4];// = {SRC_IP};
-static uint16_t g_vlan_hdr;///[VLAN_HLEN] = {VLAN_HDR};
+static uint8_t g_recv_ip[4];
+static uint16_t g_vlan_hdr_data;
+static uint16_t g_vlan_hdr_ack;///[VLAN_HLEN] = {VLAN_HDR};
 static uint32_t g_send_seq = 0;
+static uint32_t g_flow_id = 0;
+static uint64_t g_flow_size = 0;
+static uint64_t g_flow_rem = 10000000;
 static uint64_t g_total_send = 0;
 static uint64_t g_total_recv = 0;
 static double g_init_rate;
@@ -116,6 +138,10 @@ static double g_recv_rate = 0;
 static long g_rtt_app, g_rtt_hw;
 static long g_time;
 static long g_time_require;
+static long g_flow_start;
+static long g_fct;
+static int sent_queue_head = 0;
+static int sent_queue_tail = 0;
 static int ack_queue_head = 0;
 static int ack_queue_tail = 0;
 static int data_queue_head = 0;
@@ -123,26 +149,33 @@ static int data_queue_tail = 0;
 static int data_allow_queue_head = 0;
 static int data_allow_queue_tail = 0;
 static int g_ack_req_inv = 8;
+static int g_process =1;
 static short g_vlan_id;
 static bool g_lcc_mode = true;
-static struct Ack_queue ack_queue[ACK_QUEUE_LENGTH];
+static bool g_flow_active;
+static struct Sent_queue sent_queue[SENT_QUEUE_LENGTH];
+static struct Data_queue ack_queue[ACK_QUEUE_LENGTH];
 static struct Data_queue data_queue[DATA_QUEUE_LENGTH];
 static struct Data_allow_queue data_allow_queue[DATA_QUEUE_LENGTH];
 static void *buf_send;
-static int recv_data;
 static double g_rate_diff_grad;
 static double g_rate_diff;
 static double g_normalize_gradient;
+static enum CC_mode g_cc_mode;
+static enum Flow_mode g_flow_mode;
+
 pthread_mutex_t mutex_sender_thread;
-static enum Oper_mode g_oper_mode;
+pthread_mutex_t mutex_flow_complete_flag;
 
 
 void create_data_packet(void *buf, bool ack);
+void create_ack_packet(void *buf, uint32_t seq, uint32_t ack_time, uint8_t *client_ip);
 void create_send_work_request(struct ibv_send_wr *, struct ibv_sge *, struct ibv_mr *, void *, uint64_t, enum Packet_type);
 void create_recv_work_request(struct ibv_qp *, struct ibv_recv_wr *, struct ibv_sge *, struct ibv_mr *, void *, struct raw_eth_flow_attr *);
-void *send_thread_fucntion(void *Thread_arg);
-void *recv_thread_fucntion(void *Thread_arg);
-void *flow_make_packet(void *thread_arg);
+void *send_data(void *Thread_arg);
+void *recv_ack(void *Thread_arg);
+void *recv_data(void *thread_arg);
+void *send_data(void *thread_arg);
 void *clock_thread_function();
 double find_median(double *rate_array, int arry_p);
 void swap(double *a, double *b);

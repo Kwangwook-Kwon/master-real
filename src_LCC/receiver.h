@@ -12,9 +12,9 @@
 #include <netinet/udp.h>
 
 #define PORT_NUM 1
-#define ENTRY_SIZE 9000  /* maximum size of each send buffer */
-#define SQ_NUM_DESC 1024/* maximum number of sends waiting for completion */
-#define RQ_NUM_DESC 256
+#define ENTRY_SIZE 1100  /* maximum size of each send buffer */
+#define SQ_NUM_DESC 9081/* maximum number of sends waiting for completion */
+#define RQ_NUM_DESC 9081
 #define NUM_SEND_THREAD 1
 #define DATA_PACKET_SIZE 1500
 #define ACK_PACKET_SIZE 60
@@ -73,22 +73,26 @@ struct ack_queue_items{
     uint32_t ack_time;
     uint8_t client_ip[4];
     uint8_t tos;
+    bool endofdata;
 };
 
 uint64_t buf_size_send = ENTRY_SIZE * SQ_NUM_DESC; /* maximum size of data to be access directly by hw */
 uint64_t buf_size_recv = ENTRY_SIZE * RQ_NUM_DESC; /* maximum size of data to be access directly by hw */
 
-static uint8_t g_dst_mac_addr[ETH_ALEN] = {DST_MAC};
-static uint8_t g_src_mac_addr[ETH_ALEN] = {SRC_MAC};
+static uint8_t g_dst_mac_addr[ETH_ALEN];// = {DST_MAC};
+static uint8_t g_src_mac_addr[ETH_ALEN];// = {SRC_MAC};
+static uint8_t g_recv_mac_addr[ETH_ALEN];
 static uint8_t g_brd_mac_addr[ETH_ALEN] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 static uint8_t g_eth_pause_addr[ETH_ALEN] = {PAUSE_ETH_DST_ADDR};
-static uint8_t g_vlan_hdr[VLAN_HLEN] = {VLAN_HDR};
+static uint16_t g_vlan_hdr_ack;///[VLAN_HLEN] = {VLAN_HDR};
 static uint8_t g_dst_ip[4];// = {DST_IP};
-static uint8_t g_src_ip[4] = {SRC_IP};
+static uint8_t g_src_ip[4];// = {SRC_IP};
+static uint8_t g_recv_ip[4];
 static uint32_t g_recv_seq = 0;
 static uint64_t g_total_recv = 0;
 static int g_seq_revert = 0;
 static long g_time;
+static short g_vlan_id;
 static int ack_queue_head = 0, ack_queue_tail = 0;
 static struct ack_queue_items ack_queue[ACK_QUEUE_LENGTH];
 
@@ -97,7 +101,7 @@ pthread_mutex_t mutex_g_recv_data;
 
 
 void create_data_packet(void *buf);
-void create_ack_packet(void *buf, uint32_t seq, uint32_t ack_time, uint8_t *client_ip);
+void create_ack_packet(void *buf, uint32_t seq, uint32_t ack_time, uint8_t *client_ip, bool endofdata);
 void create_send_work_request(struct ibv_send_wr *, struct ibv_sge *, struct ibv_mr *, void *, uint64_t, enum Packet_type);
 void create_recv_work_request(struct ibv_qp *, struct ibv_recv_wr *, struct ibv_sge *, struct ibv_mr *, void *, struct raw_eth_flow_attr *);
 void *clock_thread_function();
