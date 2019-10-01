@@ -164,7 +164,7 @@ void create_send_work_request(struct ibv_send_wr *wr, struct ibv_sge *sg_entry, 
     else if (packet_type == ACK)
         sg_entry->length = ACK_PACKET_SIZE;
     else if (packet_type == DUMMY)
-        sg_entry->length = 60;
+        sg_entry->length = 0;
     sg_entry->lkey = mr->lkey;
     memset(wr, 0, sizeof(struct ibv_send_wr));
 
@@ -244,17 +244,17 @@ void *send_packet(void *thread_arg)
     ibv_exp_query_values(context, IBV_EXP_VALUES_CLOCK_INFO, &values);
 
     struct ibv_cq *cq_send;
-    struct ibv_cq *cq_recv;
+    //struct ibv_cq *cq_recv;
     struct ibv_exp_cq_init_attr cq_init_attr;
 
     memset(&cq_init_attr, 0, sizeof(cq_init_attr));
     cq_init_attr.flags = IBV_EXP_CQ_TIMESTAMP;
     cq_init_attr.comp_mask = IBV_EXP_CQ_INIT_ATTR_FLAGS;
     cq_send = ibv_exp_create_cq(context, SQ_NUM_DESC, NULL, NULL, 0, &cq_init_attr);
-    cq_recv = ibv_create_cq(context, RQ_NUM_DESC, NULL, NULL, 0);
-    if (!cq_send || !cq_recv)
+    //cq_recv = ibv_create_cq(context, RQ_NUM_DESC, NULL, NULL, 0);
+    if (!cq_send )//|| !cq_recv)
     {
-        fprintf(stderr, "Couldn't create CQ %d\n", errno);
+        fprintf(stderr, "Couldn't create CQ send %d\n", errno);
         exit(1);
     }
 
@@ -264,14 +264,14 @@ void *send_packet(void *thread_arg)
         .qp_context = NULL,
         /* report send completion to cq */
         .send_cq = cq_send,
-        .recv_cq = cq_recv,
+        .recv_cq = cq_send,
         .cap = {
             /* number of allowed outstanding sends without waiting for a completion */
             .max_send_wr = SQ_NUM_DESC,
-            .max_recv_wr = RQ_NUM_DESC,
+            .max_recv_wr = 0,
             /* maximum number of pointers in each descriptor */
             .max_send_sge = 1,
-            .max_recv_sge = 1,
+            //.max_recv_sge = 1,
         },
         .qp_type = IBV_QPT_RAW_PACKET,
     };
@@ -395,6 +395,7 @@ void *send_packet(void *thread_arg)
             struct vlan_hdr *vlan = (struct vlan_hdr *)(eth + 1);
             struct iphdr *ip = (struct iphdr *)(vlan + 1);
             struct lcchdr_ack *lcc = (struct lcchdr_ack *)(ip + 1);
+            printf("seq: %d\n",lcc->seq);
             wr_id = data_queue[data_queue_head].wr_id;
 
             create_send_work_request(wr_send + wr_id, sg_entry_send + wr_id, mr_send, data_queue[data_queue_head].buf, wr_id, DATA);
@@ -692,8 +693,8 @@ void *recv_ack(void *thread_arg)
     cq_init_attr.flags = IBV_EXP_CQ_TIMESTAMP;
     cq_init_attr.comp_mask = IBV_EXP_CQ_INIT_ATTR_FLAGS;
     cq_recv = ibv_exp_create_cq(context, SQ_NUM_DESC, NULL, NULL, 0, &cq_init_attr);
-    cq_send = ibv_create_cq(context, SQ_NUM_DESC, NULL, NULL, 0);
-    if (!cq_send || !cq_recv)
+    //cq_send = ibv_create_cq(context, SQ_NUM_DESC, NULL, NULL, 0);
+    if (!cq_recv)
     {
         fprintf(stderr, "Couldn't create CQ %d\n", errno);
         exit(1);
@@ -704,14 +705,14 @@ void *recv_ack(void *thread_arg)
     struct ibv_qp_init_attr qp_init_attr = {
         .qp_context = NULL,
         /* report send completion to cq */
-        .send_cq = cq_send,
+        .send_cq = cq_recv,
         .recv_cq = cq_recv,
         .cap = {
             /* number of allowed outstanding sends without waiting for a completion */
-            .max_send_wr = SQ_NUM_DESC,
+            .max_send_wr = 0,
             .max_recv_wr = RQ_NUM_DESC,
             /* maximum number of pointers in each descriptor */
-            .max_send_sge = 1,
+            //.max_send_sge = 1,
             .max_recv_sge = 1,
         },
         .qp_type = IBV_QPT_RAW_PACKET,
@@ -994,7 +995,7 @@ void *recv_ack(void *thread_arg)
                     g_time_require = (double)DATA_PACKET_SIZE * 8.0 / (g_send_rate / NUM_SEND_THREAD);
                     gettimeofday(&val, NULL);
                     ptm = localtime(&val.tv_sec);
-                    fprintf(fp, "%02d%02d%02d.%06ld, %f, %f ,%ld, %f, %f, %d, %d\n", ptm->tm_hour, ptm->tm_min, ptm->tm_sec, val.tv_usec, g_recv_rate, g_send_rate, g_rtt_hw, g_rate_diff_grad, g_rate_diff, time_now_app, ack_time_app);
+                    fprintf(fp, "%02d%02d%02d.%06ld, %f, %f ,%ld, %f, %f, %ld, %ld\n", ptm->tm_hour, ptm->tm_min, ptm->tm_sec, val.tv_usec, g_recv_rate, g_send_rate, g_rtt_hw, g_rate_diff_grad, g_rate_diff, time_now_app, ack_time_app);
                 }
                 else if (g_cc_mode == TIMELY)
                 {
@@ -1030,7 +1031,7 @@ void *recv_ack(void *thread_arg)
 
                     gettimeofday(&val, NULL);
                     ptm = localtime(&val.tv_sec);
-                    fprintf(fp, "%02d%02d%02d.%06ld, %f, %f ,%d\n", ptm->tm_hour, ptm->tm_min, ptm->tm_sec, val.tv_usec, g_recv_rate, g_send_rate, g_rtt_hw);
+                    fprintf(fp, "%02d%02d%02d.%06ld, %f, %f ,%ld\n", ptm->tm_hour, ptm->tm_min, ptm->tm_sec, val.tv_usec, g_recv_rate, g_send_rate, g_rtt_hw);
                 }
 
                 time_prev = lcc->ack_time;
@@ -1089,7 +1090,7 @@ void *recv_data(void *thread_arg)
     struct ibv_qp_init_attr qp_init_attr = {
         .qp_context = NULL,
         /* report send completion to cq */
-        .send_cq = cq_send,
+        .send_cq = cq_recv,
         .recv_cq = cq_recv,
         .cap = {
             /* number of allowed outstanding sends without waiting for a completion */
@@ -1564,7 +1565,7 @@ int main()
         }
         if (sleep_cnt > 10000)
         {
-            printf("%02d%02d%02d.%06ld, %f, %f, %ld, %d, %ld, %ld\n", ptm->tm_hour, ptm->tm_min, ptm->tm_sec, val.tv_usec, g_recv_rate, g_send_rate, g_rtt_hw, g_ack_req_inv, g_flow_id, g_flow_size);
+            printf("%02d%02d%02d.%06ld, %f, %f, %ld, %d, %d, %ld\n", ptm->tm_hour, ptm->tm_min, ptm->tm_sec, val.tv_usec, g_recv_rate, g_send_rate, g_rtt_hw, g_ack_req_inv, g_flow_id, g_flow_size);
             sleep_cnt = 0;
         }
     }

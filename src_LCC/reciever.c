@@ -162,10 +162,10 @@ void *ack_thread_function()
     int ret;
     /* 4. Create Complition Queue (CQ) */
     struct ibv_cq *cq_recv, *cq_send;
-    cq_recv = ibv_create_cq(context, RQ_NUM_DESC, NULL, NULL, 0);
+    //cq_recv = ibv_create_cq(context, RQ_NUM_DESC, NULL, NULL, 0);
     cq_send = ibv_create_cq(context, SQ_NUM_DESC, NULL, NULL, 0);
 
-    if (!cq_recv || !cq_send)
+    if (!cq_send)
     {
         fprintf(stderr, "Couldn't create CQ %d\n", errno);
         exit(1);
@@ -178,14 +178,14 @@ void *ack_thread_function()
 
         /* report receive completion to cq */
         .send_cq = cq_send,
-        .recv_cq = cq_recv,
+        .recv_cq = cq_send,
         .cap = {
             /* no send ring */
             .max_send_wr = SQ_NUM_DESC,
             /* maximum number of packets in ring */
-            .max_recv_wr = RQ_NUM_DESC,
+            .max_recv_wr = 0,
             /* only one pointer per descriptor */
-            .max_recv_sge = 1,
+            //.max_recv_sge = 1,
             .max_send_sge = 1,
         },
 
@@ -238,12 +238,12 @@ void *ack_thread_function()
     }
 
     /* 9. Allocate Memory */
-    buf_size_recv = ENTRY_SIZE * RQ_NUM_DESC;
-    buf_size_recv = ENTRY_SIZE * SQ_NUM_DESC; /* maximum size of data to be accessed by hardware */
-    void *buf_recv, *buf_send;
-    buf_recv = malloc(buf_size_recv);
+    //buf_size_recv = ENTRY_SIZE * RQ_NUM_DESC;
+    buf_size_send = ENTRY_SIZE * SQ_NUM_DESC; /* maximum size of data to be accessed by hardware */
+    void *buf_send;
+    //buf_recv = malloc(buf_size_recv);
     buf_send = malloc(buf_size_send);
-    if (!buf_recv || !buf_send)
+    if ( !buf_send)
     {
         fprintf(stderr, "Coudln't allocate memory\n");
         exit(1);
@@ -251,9 +251,9 @@ void *ack_thread_function()
 
     /* 10. Register the user memory so it can be accessed by the HW directly */
     struct ibv_mr *mr_recv, *mr_send;
-    mr_recv = ibv_reg_mr(pd, buf_recv, buf_size_recv, IBV_ACCESS_LOCAL_WRITE);
+    //mr_recv = ibv_reg_mr(pd, buf_recv, buf_size_recv, IBV_ACCESS_LOCAL_WRITE);
     mr_send = ibv_reg_mr(pd, buf_send, buf_size_send, IBV_ACCESS_LOCAL_WRITE);
-    if (!mr_recv || !mr_send)
+    if ( !mr_send)
     {
         fprintf(stderr, "Couldn't register mr\n");
         exit(1);
@@ -261,8 +261,7 @@ void *ack_thread_function()
 
     /* 11. Attach all buffers to the ring */
 
-    struct ibv_sge sg_entry_recv[RQ_NUM_DESC], sg_entry_send[SQ_NUM_DESC];
-    struct ibv_recv_wr wr_recv[RQ_NUM_DESC], *bad_wr_recv;
+    struct ibv_sge  sg_entry_send[SQ_NUM_DESC];
     struct ibv_send_wr wr_send[SQ_NUM_DESC], *bad_wr_send;
 
     for (uint64_t i = 0; i < SQ_NUM_DESC; i++)
@@ -284,61 +283,7 @@ void *ack_thread_function()
     * - if this is a single descriptor or a list (next == NULL single)
     */
 
-    for (int n = 0; n < RQ_NUM_DESC; n++)
-    {
-        wr_recv[n].num_sge = 1;
-        wr_recv[n].sg_list = &sg_entry_recv[n];
-        wr_recv[n].next = NULL;
-        /* pointer to packet buffer size and memory key of each packet buffer */
-        sg_entry_recv[n].length = ENTRY_SIZE;
-        sg_entry_recv[n].lkey = mr_recv->lkey;
-        /* each descriptor points to max MTU size buffer */
-        sg_entry_recv[n].addr = (uint64_t)buf_recv + ENTRY_SIZE * n;
 
-        /* index of descriptor returned when packet arrives */
-        wr_recv[n].wr_id = n;
-
-        ibv_post_recv(qp, &wr_recv[n], &bad_wr_recv);
-    }
-
-    /* 12. Register steering rule to intercept packet to DEST_MAC and place packet in ring pointed by ->qp */
-    struct raw_eth_flow_attr
-    {
-        struct ibv_flow_attr attr;
-        struct ibv_flow_spec_eth spec_eth;
-        //struct ibv_flow_spec_ipv4 spec_ipv4;
-    } __attribute__((packed)) flow_attr = {
-        .attr = {
-            .comp_mask = 0,
-            .type = IBV_FLOW_ATTR_NORMAL,
-            .size = sizeof(flow_attr),
-            .priority = 0,
-            .num_of_specs = 1,
-            .port = PORT_NUM,
-            .flags = 0,
-        },
-        .spec_eth = {.type = IBV_EXP_FLOW_SPEC_ETH, .size = sizeof(struct ibv_flow_spec_eth), .val = {
-                                                                                                  .dst_mac = DST_MAC_RECV,
-                                                                                                  .src_mac = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
-                                                                                                  .ether_type = 0,
-                                                                                                  .vlan_tag = 0,
-                                                                                              },
-                     .mask = {
-                         .dst_mac = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF},
-                         .src_mac = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
-                         .ether_type = 0,
-                         .vlan_tag = 0,
-                     }},
-    };
-
-    /* 13. Create steering rule */
-    struct ibv_flow *eth_flow;
-    eth_flow = ibv_create_flow(qp, &flow_attr.attr);
-    if (!eth_flow)
-    {
-        fprintf(stderr, "Couldn't attach steering flow\n");
-        exit(1);
-    }
 
     /* 14. Wait for CQ event upon message received, and print a message */
     int msgs_completed_recv, msgs_completed_send;
@@ -401,10 +346,10 @@ void *recv_thread_function(void *thread_arg)
     cq_init_attr.flags = IBV_EXP_CQ_TIMESTAMP;
     cq_init_attr.comp_mask = IBV_EXP_CQ_INIT_ATTR_FLAGS;
     cq_recv = ibv_exp_create_cq(context, SQ_NUM_DESC, NULL, NULL, 0, &cq_init_attr);
-    cq_send = ibv_create_cq(context, SQ_NUM_DESC, NULL, NULL, 0);
+    //cq_send = ibv_create_cq(context, SQ_NUM_DESC, NULL, NULL, 0);
     //cq_recv = ibv_create_cq(context, RQ_NUM_DESC, NULL, NULL, 0);
 
-    if (!cq_recv || !cq_send)
+    if (!cq_recv)// || !cq_send)
     {
         fprintf(stderr, "Couldn't create CQ %d\n", errno);
         exit(1);
@@ -416,16 +361,16 @@ void *recv_thread_function(void *thread_arg)
         .qp_context = NULL,
 
         /* report receive completion to cq */
-        .send_cq = cq_send,
+        .send_cq = cq_recv,
         .recv_cq = cq_recv,
         .cap = {
             /* no send ring */
-            .max_send_wr = SQ_NUM_DESC,
+            .max_send_wr = 0,
             /* maximum number of packets in ring */
             .max_recv_wr = RQ_NUM_DESC,
             /* only one pointer per descriptor */
             .max_recv_sge = 1,
-            .max_send_sge = 1,
+            //.max_send_sge = 1,
         },
 
         .qp_type = IBV_QPT_RAW_PACKET,
@@ -478,21 +423,21 @@ void *recv_thread_function(void *thread_arg)
 
     /* 9. Allocate Memory */
     buf_size_recv = ENTRY_SIZE * RQ_NUM_DESC;
-    buf_size_recv = ENTRY_SIZE * SQ_NUM_DESC; /* maximum size of data to be accessed by hardware */
+    //buf_size_recv = ENTRY_SIZE * SQ_NUM_DESC; /* maximum size of data to be accessed by hardware */
     void *buf_recv, *buf_send;
     buf_recv = malloc(buf_size_recv);
-    buf_send = malloc(buf_size_send);
-    if (!buf_recv || !buf_send)
+    //buf_send = malloc(buf_size_send);
+    if (!buf_recv )//|| !buf_send)
     {
         fprintf(stderr, "Coudln't allocate memory\n");
         exit(1);
     }
 
     /* 10. Register the user memory so it can be accessed by the HW directly */
-    struct ibv_mr *mr_recv, *mr_send;
+    struct ibv_mr *mr_recv;
     mr_recv = ibv_reg_mr(pd, buf_recv, buf_size_recv, IBV_ACCESS_LOCAL_WRITE);
-    mr_send = ibv_reg_mr(pd, buf_send, buf_size_send, IBV_ACCESS_LOCAL_WRITE);
-    if (!mr_recv || !mr_send)
+    //mr_send = ibv_reg_mr(pd, buf_send, buf_size_send, IBV_ACCESS_LOCAL_WRITE);
+    if (!mr_recv )//|| !mr_send)
     {
         fprintf(stderr, "Couldn't register mr\n");
         exit(1);
@@ -500,22 +445,10 @@ void *recv_thread_function(void *thread_arg)
 
     /* 11. Attach all buffers to the ring */
 
-    struct ibv_sge sg_entry_recv[RQ_NUM_DESC], sg_entry_send[SQ_NUM_DESC];
+    struct ibv_sge sg_entry_recv[RQ_NUM_DESC];//;, sg_entry_send[SQ_NUM_DESC];
     struct ibv_recv_wr wr_recv[RQ_NUM_DESC], *bad_wr_recv;
-    struct ibv_send_wr wr_send[SQ_NUM_DESC], *bad_wr_send;
+    //struct ibv_send_wr wr_send[SQ_NUM_DESC], *bad_wr_send;
 
-    for (uint64_t i = 0; i < SQ_NUM_DESC; i++)
-    {
-        create_dummy_packet(buf_send + i * ENTRY_SIZE);
-        create_send_work_request(wr_send + i, sg_entry_send + i, mr_send, buf_send + i * ENTRY_SIZE, i, DUMMY);
-        ret = ibv_post_send(qp, wr_send + i, &bad_wr_send);
-
-        if (ret < 0)
-        {
-            fprintf(stderr, "failed in post send\n");
-            exit(1);
-        }
-    }
 
     /*
     * descriptor for receive transaction - details:
