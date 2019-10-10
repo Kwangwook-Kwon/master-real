@@ -22,9 +22,9 @@
 
 #define TOTAL_TRANSMIT_DATA -1
 #define SEND_BUCKET_LIMIT 33000
-#define SENT_QUEUE_LENGTH 50000
+#define SENT_QUEUE_LENGTH 100000
 #define ACK_QUEUE_LENGTH 50000
-#define DATA_QUEUE_LENGTH 50000
+#define DATA_QUEUE_LENGTH 100000
 
 /* template of packet to send */
 #define PAUSE_ETH_DST_ADDR 0x01, 0x80, 0xC2, 0x00, 0x00, 0x01
@@ -88,8 +88,8 @@ struct Thread_arg
 struct Sent_queue
 {
     bool endofdata;
-    long ack_time_app;
-    uint32_t ack_time_hw;
+    long sent_time_app;
+    uint32_t sent_time_hw;
     uint32_t seq;
 };
 
@@ -127,6 +127,8 @@ static uint16_t g_vlan_hdr_data;
 static uint16_t g_vlan_hdr_ack;///[VLAN_HLEN] = {VLAN_HDR};
 static uint32_t g_send_seq = 0;
 static uint32_t g_flow_id = 0;
+static uint32_t g_fct;
+static uint32_t g_rtt_hw;
 static uint64_t g_flow_size = 0;
 static uint64_t g_flow_rem = 10000000;
 static uint64_t g_total_send = 0;
@@ -135,11 +137,10 @@ static double g_init_rate;
 static double g_send_rate;
 static double g_prev_rate;
 static double g_recv_rate = 0;
-static long g_rtt_app, g_rtt_hw;
+static long g_rtt_app;
 static long g_time;
 static long g_time_require;
 static long g_flow_start;
-static long g_fct;
 static int sent_queue_head = 0;
 static int sent_queue_tail = 0;
 static int ack_queue_head = 0;
@@ -148,8 +149,10 @@ static int data_queue_head = 0;
 static int data_queue_tail = 0;
 static int data_allow_queue_head = 0;
 static int data_allow_queue_tail = 0;
-static int g_ack_req_inv = 8;
+static int g_seed = 0;
+static int g_ack_req_inv = 16;
 static int g_process =1;
+static int g_num_flows = 0;
 static short g_vlan_id;
 static bool g_lcc_mode = true;
 static bool g_flow_active;

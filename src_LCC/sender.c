@@ -53,7 +53,10 @@ void create_ack_packet(void *buf, uint32_t seq, uint32_t ack_time, uint8_t *clie
     memset(lcc, 0, sizeof(struct lcchdr_ack));
     size_t lcc_len = ip_len - sizeof(struct iphdr);
     lcc->source = UDP_SRC;
-    lcc->dest = UDP_DST;
+    if (g_cc_mode == STREAM)
+        lcc->dest = UDP_DST;
+    else
+        lcc->dest = UDP_DST;
     lcc->len = htons((uint16_t)lcc_len);
     lcc->check = 0; //Zero means no checksum check at revciever
     lcc->ack = 1;
@@ -123,7 +126,6 @@ void create_data_packet(void *buf, bool ack)
 
     if (g_flow_mode != INFINITE)
         g_flow_rem -= lcc_len - sizeof(struct lcchdr);
-
     if (g_flow_rem <= 0)
     {
         lcc->endofdata = 1;
@@ -252,7 +254,7 @@ void *send_packet(void *thread_arg)
     cq_init_attr.comp_mask = IBV_EXP_CQ_INIT_ATTR_FLAGS;
     cq_send = ibv_exp_create_cq(context, SQ_NUM_DESC, NULL, NULL, 0, &cq_init_attr);
     //cq_recv = ibv_create_cq(context, RQ_NUM_DESC, NULL, NULL, 0);
-    if (!cq_send )//|| !cq_recv)
+    if (!cq_send) //|| !cq_recv)
     {
         fprintf(stderr, "Couldn't create CQ send %d\n", errno);
         exit(1);
@@ -385,6 +387,10 @@ void *send_packet(void *thread_arg)
             }
         }
     }
+    bool ack;
+    bool endofdata;
+    uint32_t seq;
+    uint32_t timestamp;
 
     while (1)
     {
@@ -396,12 +402,18 @@ void *send_packet(void *thread_arg)
             struct iphdr *ip = (struct iphdr *)(vlan + 1);
             struct lcchdr_ack *lcc = (struct lcchdr_ack *)(ip + 1);
             wr_id = data_queue[data_queue_head].wr_id;
+            ack = lcc->ackReq;
+            endofdata = lcc->endofdata;
+            seq = lcc->seq;
 
             create_send_work_request(wr_send + wr_id, sg_entry_send + wr_id, mr_send, data_queue[data_queue_head].buf, wr_id, DATA);
+            data_queue_head = (data_queue_head + 1) % DATA_QUEUE_LENGTH;
+            //printf("seq: %d\n", seq);
+
             ret = ibv_post_send(qp, wr_send + wr_id, &bad_wr_send);
             send_time = g_time;
 
-            if (lcc->ackReq == 1)
+            if (ack == 1) // || g_cc_mode == STREAM)
             {
                 do
                 {
@@ -413,7 +425,7 @@ void *send_packet(void *thread_arg)
                             if (wc_exp_send[i].wr_id == wr_id)
                             {
                                 loop = false;
-                                wr_id_i = i;
+                                timestamp = ibv_exp_cqe_ts_to_ns(&values.clock_info, wc_exp_send[i].timestamp);
                             }
                             if ((data_allow_queue_tail + 1) % DATA_QUEUE_LENGTH != data_allow_queue_head)
                             {
@@ -428,12 +440,12 @@ void *send_packet(void *thread_arg)
                         }
                     }
                 } while (msgs_completed_send == 0 || loop);
-                if ((sent_queue_tail + 1) % SENT_QUEUE_LENGTH != sent_queue_head)
+                if ((sent_queue_tail + 1) % SENT_QUEUE_LENGTH != sent_queue_head && ack == 1)
                 {
-                    sent_queue[sent_queue_tail].endofdata = lcc->endofdata;
-                    sent_queue[sent_queue_tail].seq = lcc->seq;
-                    sent_queue[sent_queue_tail].ack_time_hw = ibv_exp_cqe_ts_to_ns(&values.clock_info, wc_exp_send[wr_id_i].timestamp);
-                    sent_queue[sent_queue_tail].ack_time_app = send_time;
+                    sent_queue[sent_queue_tail].endofdata = endofdata;
+                    sent_queue[sent_queue_tail].seq = seq;
+                    sent_queue[sent_queue_tail].sent_time_hw = timestamp;
+                    sent_queue[sent_queue_tail].sent_time_app = send_time;
                     sent_queue_tail = (sent_queue_tail + 1) % SENT_QUEUE_LENGTH;
                 }
                 else if ((sent_queue_tail + 1) % SENT_QUEUE_LENGTH == sent_queue_head)
@@ -466,7 +478,26 @@ void *send_packet(void *thread_arg)
                 fprintf(stderr, "failed in post send\n");
                 exit(1);
             }
-            data_queue_head = (data_queue_head + 1) % DATA_QUEUE_LENGTH;
+        }
+        else
+        {
+            msgs_completed_send = ibv_exp_poll_cq(cq_send, SQ_NUM_DESC, wc_exp_send, sizeof(struct ibv_exp_wc));
+            if (msgs_completed_send > 0)
+            {
+                for (int i = 0; i < msgs_completed_send; i++)
+                {
+                    if ((data_allow_queue_tail + 1) % DATA_QUEUE_LENGTH != data_allow_queue_head)
+                    {
+                        data_allow_queue[data_allow_queue_tail].wr_id = wc_exp_send[i].wr_id;
+                        data_allow_queue_tail = (data_allow_queue_tail + 1) % DATA_QUEUE_LENGTH;
+                    }
+                    else
+                    {
+                        fprintf(stderr, "Data allow queue is full \n");
+                        exit(1);
+                    }
+                }
+            }
         }
     }
 }
@@ -512,7 +543,7 @@ void *send_data(void *thread_arg)
 
     if (g_flow_mode == DYNAMIC)
     {
-        srand((unsigned)time(NULL) + rand());
+        srand((unsigned)time(NULL) + g_seed);
         g_flow_size = get_length();
         g_flow_rem = g_flow_size;
         g_flow_active = true;
@@ -533,35 +564,28 @@ void *send_data(void *thread_arg)
             time_taken += MIN((time_start + 1 * 1e9 - time_prev), SEND_BUCKET_LIMIT);
         time_prev = time_start;
 
-        if (time_taken >= g_time_require)
+        if (time_taken >= g_time_require && data_allow_queue_head != data_allow_queue_tail && (data_queue_tail + 1) % DATA_QUEUE_LENGTH != data_queue_head || g_send_seq < 16)
         {
-            time_taken -= g_time_require;
+            if (g_send_seq >= 16)
+                time_taken -= g_time_require;
             if (g_cc_mode == LCC || g_cc_mode == STREAM)
             {
-                pthread_mutex_lock(&mutex_sender_thread);
-                while (data_allow_queue_head == data_allow_queue_tail)
-                {
-                }
+
                 wr_id = data_allow_queue[data_allow_queue_head].wr_id;
                 data_allow_queue_head = (data_allow_queue_head + 1) % DATA_QUEUE_LENGTH;
-                pthread_mutex_unlock(&mutex_sender_thread);
 
-                while ((data_queue_tail + 1) % DATA_QUEUE_LENGTH == data_queue_head) // || data_allow_queue_head == data_allow_queue_tail)
-                {
-                }
-
-                if (ack_tag >= g_ack_req_inv - 1)
+                if (ack_tag >= g_ack_req_inv - 1) // && g_cc_mode == LCC)
                 {
                     create_data_packet(buf_send + wr_id * ENTRY_SIZE, true);
                     ack_tag = 0;
-                    if (10 * g_rtt_hw > g_time_require * g_ack_req_inv)
+                    if (2 * g_rtt_hw > g_time_require * g_ack_req_inv)
                         g_ack_req_inv += 1;
-                    else if (11 * g_rtt_hw < g_time_require * g_ack_req_inv)
+                    else if (3 * g_rtt_hw < g_time_require * g_ack_req_inv)
                     {
                         g_ack_req_inv -= 1;
                     }
                     g_ack_req_inv = MAX(g_ack_req_inv, 8);
-                    g_ack_req_inv = MIN(g_ack_req_inv, 2048);
+                    g_ack_req_inv = MIN(g_ack_req_inv, 32);
                 }
                 else
                 {
@@ -577,17 +601,10 @@ void *send_data(void *thread_arg)
             {
                 for (int i = 0; i < 16; i++)
                 {
-                    pthread_mutex_lock(&mutex_sender_thread);
-                    while (data_allow_queue_head == data_allow_queue_tail)
-                    {
-                    }
+                    //pthread_mutex_lock(&mutex_sender_thread);
                     wr_id = data_allow_queue[data_allow_queue_head].wr_id;
                     data_allow_queue_head = (data_allow_queue_head + 1) % DATA_QUEUE_LENGTH;
-                    pthread_mutex_unlock(&mutex_sender_thread);
-
-                    while ((data_queue_tail + 1) % DATA_QUEUE_LENGTH == data_queue_head) //|| data_allow_queue_head == data_allow_queue_tail)
-                    {
-                    }
+                    //pthread_mutex_unlock(&mutex_sender_thread);
 
                     if (i == 15)
                     {
@@ -595,7 +612,7 @@ void *send_data(void *thread_arg)
                     }
                     else
                     {
-                        create_data_packet(buf_send + wr_id *ENTRY_SIZE, false);
+                        create_data_packet(buf_send + wr_id * ENTRY_SIZE, false);
                     }
                     g_total_send += DATA_PACKET_SIZE;
                     if (ret < 0)
@@ -621,23 +638,29 @@ void *send_data(void *thread_arg)
             {
                 usleep(1);
                 wait++;
-                if (wait > 100000)
-                {
-                    wait = 0;
-                    printf("skipped!!! flowid: %d\n", g_flow_id);
-                    goto skip;
-                }
+                //if (wait > 100000)
+                //{
+                wait = 0;
+                //printf("skipped!!! flowid: %d dest: %d\n", g_flow_id);
+                //sent_queue_head = 0;
+                //sent_queue_tail = 0;
+                //goto skip;
+                //}
             }
-
             fprintf(trace, "%d, %ld, %ld, %d, %d\n", g_flow_id, g_flow_size, g_fct, g_src_ip[2] - 8, g_dst_ip[2] - 8);
             fflush(trace);
-
+            //if(g_cc_mode == STREAM)
+            //    usleep((rand()%10)*1000);
         skip:
             pthread_mutex_lock(&mutex_flow_complete_flag);
             g_flow_active = true;
             pthread_mutex_unlock(&mutex_flow_complete_flag);
             g_flow_id++;
-
+            if (g_num_flows < g_flow_id)
+            {
+                fprintf(stderr, "\n\nALL FLOWS ARE FINNISHED!\n\n");
+                exit(1);
+            }
             do
             {
                 dst = rand() % 8 + 9;
@@ -653,7 +676,7 @@ void *send_data(void *thread_arg)
                 exit(1);
             }
 
-            if (g_cc_mode == LCC || g_cc_mode == STREAM)
+            if (g_cc_mode == LCC)
                 g_ack_req_inv = 8;
             else
                 g_ack_req_inv = 16;
@@ -665,6 +688,7 @@ void *send_data(void *thread_arg)
             time_prev = g_time;
         }
     }
+    printf("thread finished!\n");
 }
 
 void *recv_ack(void *thread_arg)
@@ -845,7 +869,7 @@ void *recv_ack(void *thread_arg)
     }
 
     FILE *fp = fopen("trace_rtt.out", "w");
-    fprintf(fp, "time, rate_recv, rate_send, rtt_hw, g_rate_diff_grad, g_rate_diff, time_now_app, ack_time_app\n");
+    fprintf(fp, "time, rate_recv, rate_send, rtt_hw\n");
 
     uint64_t wr_id = 0;
 
@@ -859,7 +883,7 @@ void *recv_ack(void *thread_arg)
     uint32_t prev_seq = 0;
     uint32_t seq;
     uint32_t time_now_hw;
-    uint32_t ack_time_hw;
+    uint32_t sent_time_hw;
 
     double rate_curr;
     double rate_diff;
@@ -868,7 +892,7 @@ void *recv_ack(void *thread_arg)
     double normalized_gradiant;
 
     long time_taken = 0;
-    long ack_time_app;
+    long sent_time_app;
     long time_now_app;
     long prev_rtt;
     long new_rtt_diff;
@@ -909,11 +933,11 @@ void *recv_ack(void *thread_arg)
                 if (sent_queue_head != sent_queue_tail)
                 {
                     seq = sent_queue[sent_queue_head].seq;
-                    ack_time_app = sent_queue[sent_queue_head].ack_time_app;
-                    ack_time_hw = sent_queue[sent_queue_head].ack_time_hw;
+                    sent_time_app = sent_queue[sent_queue_head].sent_time_app;
+                    sent_time_hw = sent_queue[sent_queue_head].sent_time_hw;
                     sent_queue_head = (sent_queue_head + 1) % SENT_QUEUE_LENGTH;
 
-                    g_rtt_hw = time_now_hw - ack_time_hw;
+                    g_rtt_hw = time_now_hw - sent_time_hw;
 
                     if (lcc->seq != seq)
                     {
@@ -949,7 +973,7 @@ void *recv_ack(void *thread_arg)
 
                 if (lcc->seq == 0)
                 {
-                    g_flow_start = ack_time_hw;
+                    g_flow_start = sent_time_hw;
                     time_prev = lcc->ack_time;
                     prev_seq = lcc->seq;
                     prev_rtt = g_rtt_hw;
@@ -981,20 +1005,21 @@ void *recv_ack(void *thread_arg)
 
                 if (g_cc_mode == LCC)
                 {
-                    if (g_rate_diff < 0.03 || g_rate_diff_grad < 0 || g_rtt_hw < 10000)
+                    if (g_rate_diff < 0.05 || g_rate_diff_grad < 0 || g_rtt_hw < 10000)
                     {
                         g_send_rate += 0.05;
                     }
                     else
                     {
-                        g_send_rate = g_recv_rate * 0.9;
+                        mN = 0;
+                        g_send_rate = g_recv_rate * 0.90;
                     }
                     g_send_rate = MAX(0.2, g_send_rate);
                     g_send_rate = MIN(9.5, g_send_rate);
                     g_time_require = (double)DATA_PACKET_SIZE * 8.0 / (g_send_rate / NUM_SEND_THREAD);
-                    gettimeofday(&val, NULL);
-                    ptm = localtime(&val.tv_sec);
-                    fprintf(fp, "%02d%02d%02d.%06ld, %f, %f ,%ld, %f, %f, %ld, %ld\n", ptm->tm_hour, ptm->tm_min, ptm->tm_sec, val.tv_usec, g_recv_rate, g_send_rate, g_rtt_hw, g_rate_diff_grad, g_rate_diff, time_now_app, ack_time_app);
+                    //gettimeofday(&val, NULL);
+                    //ptm = localtime(&val.tv_sec);
+                    //fprintf(fp, "%02d%02d%02d.%06ld, %f, %f ,%ld, %f, %f, %ld, %ld\n", ptm->tm_hour, ptm->tm_min, ptm->tm_sec, val.tv_usec, g_recv_rate, g_send_rate, g_rtt_hw, g_rate_diff_grad, g_rate_diff, time_now_app, sent_time_app);
                 }
                 else if (g_cc_mode == TIMELY)
                 {
@@ -1028,10 +1053,14 @@ void *recv_ack(void *thread_arg)
                     g_send_rate = MIN(9.5, g_send_rate);
                     g_time_require = (double)DATA_PACKET_SIZE * 8.0 * 16 / (g_send_rate / NUM_SEND_THREAD);
 
-                    gettimeofday(&val, NULL);
-                    ptm = localtime(&val.tv_sec);
-                    fprintf(fp, "%02d%02d%02d.%06ld, %f, %f ,%ld\n", ptm->tm_hour, ptm->tm_min, ptm->tm_sec, val.tv_usec, g_recv_rate, g_send_rate, g_rtt_hw);
+                    //gettimeofday(&val, NULL);
+                    //ptm = localtime(&val.tv_sec);
+                    //fprintf(fp, "%02d%02d%02d.%06ld, %f, %f ,%ld\n", ptm->tm_hour, ptm->tm_min, ptm->tm_sec, val.tv_usec, g_recv_rate, g_send_rate, g_rtt_hw);
                 }
+
+                gettimeofday(&val, NULL);
+                ptm = localtime(&val.tv_sec);
+                fprintf(fp, "%02d%02d%02d.%06ld, %f, %f ,%ld\n", ptm->tm_hour, ptm->tm_min, ptm->tm_sec, val.tv_usec, g_recv_rate, g_send_rate, g_rtt_hw);
 
                 time_prev = lcc->ack_time;
                 prev_seq = lcc->seq;
@@ -1230,7 +1259,7 @@ void *recv_data(void *thread_arg)
     }
 
     FILE *fp = fopen("trace_rtt.out", "w");
-    fprintf(fp, "time, rate_recv, rate_send, rtt_hw, g_rate_diff_grad, g_rate_diff, time_now_app, ack_time_app\n");
+    fprintf(fp, "time, rate_recv, rate_send, rtt_hw, g_rate_diff_grad, g_rate_diff, time_now_app, sent_time_app\n");
 
     uint64_t wr_id = 0;
 
@@ -1244,7 +1273,7 @@ void *recv_data(void *thread_arg)
     uint32_t prev_seq = 0;
     uint32_t seq;
     uint32_t time_now_hw;
-    uint32_t ack_time_hw;
+    uint32_t sent_time_hw;
 
     double rate_curr;
     double rate_diff;
@@ -1253,7 +1282,7 @@ void *recv_data(void *thread_arg)
     double normalized_gradiant;
 
     long time_taken = 0;
-    long ack_time_app;
+    long sent_time_app;
     long time_now_app;
     long prev_rtt;
     long new_rtt_diff;
@@ -1286,13 +1315,13 @@ void *recv_data(void *thread_arg)
 
                 if (lcc_data->ackReq == 1)
                 {
-                    pthread_mutex_lock(&mutex_sender_thread);
+                    //pthread_mutex_lock(&mutex_sender_thread);
                     while (data_allow_queue_head == data_allow_queue_tail)
                     {
                     }
                     wr_id = data_allow_queue[data_allow_queue_head].wr_id;
                     data_allow_queue_head = (data_allow_queue_head + 1) % DATA_QUEUE_LENGTH;
-                    pthread_mutex_unlock(&mutex_sender_thread);
+                    //pthread_mutex_unlock(&mutex_sender_thread);
 
                     while ((ack_queue_tail + 1) % ACK_QUEUE_LENGTH == ack_queue_head) // || data_allow_queue_head == data_allow_queue_tail)
                     {
@@ -1410,12 +1439,24 @@ int main()
                 sscanf(varBuff, "%lf", &g_init_rate);
                 printf("\n INIT_RATE : %f", g_init_rate);
             }
+            if (strncasecmp(readBuff, "NUM_FLOWS", strlen("NUM_FLOWS")) == 0)
+            {
+                strcpy(varBuff, strrchr(readBuff, '=') + 1);
+                sscanf(varBuff, "%d", &g_num_flows);
+                printf("\n NUM_FLOWS : %d", g_num_flows);
+            }
             if (strncasecmp(readBuff, "PROCESS", strlen("PROCESS")) == 0)
             {
                 strcpy(varBuff, strrchr(readBuff, '=') + 1);
                 sscanf(varBuff, "%d", &g_process);
                 printf("\n PROCESS : %d", g_process);
                 g_process = g_process * 8;
+            }
+            if (strncasecmp(readBuff, "RAND_SEED", strlen("RAND_SEED")) == 0)
+            {
+                strcpy(varBuff, strrchr(readBuff, '=') + 1);
+                sscanf(varBuff, "%d", &g_seed);
+                printf("\n RAND_SEED : %d", g_seed);
             }
             if (strncasecmp(readBuff, "CC_MODE", strlen("CC_MODE")) == 0)
             {
@@ -1540,7 +1581,10 @@ int main()
     pthread_t send_thread;
     pthread_create(&send_thread, NULL, send_packet, NULL);
 
-    sleep(2);
+    srand(g_seed);
+    printf("\n\n\n %d, %d\n", rand(),g_seed);
+    //sleep(2);
+    usleep((rand() % 100)* 1000 + 2 * 1000 * 1000); //+ 2 * 1000 * 1000);
 
     pthread_t send_packet_tread;
     pthread_create(&send_packet_tread, NULL, send_data, NULL);
