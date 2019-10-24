@@ -53,10 +53,7 @@ void create_ack_packet(void *buf, uint32_t seq, uint32_t ack_time, uint8_t *clie
     memset(lcc, 0, sizeof(struct lcchdr_ack));
     size_t lcc_len = ip_len - sizeof(struct iphdr);
     lcc->source = UDP_SRC;
-    if (g_cc_mode == STREAM)
-        lcc->dest = UDP_DST;
-    else
-        lcc->dest = UDP_DST;
+    lcc->dest = UDP_DST;
     lcc->len = htons((uint16_t)lcc_len);
     lcc->check = 0; //Zero means no checksum check at revciever
     lcc->ack = 1;
@@ -94,7 +91,7 @@ void create_data_packet(void *buf, bool ack)
         ip_len = MIN(DATA_PACKET_SIZE - sizeof(struct ethhdr) - sizeof(struct vlan_hdr), sizeof(struct iphdr) + sizeof(struct lcchdr) + g_flow_rem);
     ip->ihl = 5;
     ip->version = 4;
-    ip->tos = 65;
+    ip->tos = 97;
     ip->tot_len = htons((uint16_t)ip_len);
     ip->id = 0;
     ip->frag_off = 0;
@@ -116,7 +113,9 @@ void create_data_packet(void *buf, bool ack)
     lcc->data = 1;
     lcc->seq = g_send_seq;
     if (ack == true || lcc->seq == 0)
+    {
         lcc->ackReq = 1;
+    }
     g_send_seq++;
 
     // Payload : Data150
@@ -224,10 +223,61 @@ void *clock_thread_function()
     time.tv_sec = 0;
     time.tv_nsec = 0;
 
+    long time_start, time_taken;
+
+    clock_gettime(CLOCK_MONOTONIC, &time);
+    g_time = time.tv_nsec;
+    dcqcn_time_prev = g_time;
+    uint64_t byte_cnt;
+    dcqcn_seq_prev = g_send_seq;
+    FILE *fp = fopen("trace_rtt.out", "w");
     while (1)
     {
         clock_gettime(CLOCK_MONOTONIC, &time);
         g_time = time.tv_nsec;
+        time_start = g_time;
+        if (time_start >= dcqcn_time_prev)
+            time_taken += (time_start - dcqcn_time_prev);
+        else
+            time_taken += (time_start + 1 * 1e9 - dcqcn_time_prev);
+        dcqcn_time_prev = time_start;
+        if ((time_taken > 55000 || g_send_seq - dcqcn_seq_prev > 10 * 1000) && g_cc_mode == DCQCN)
+        {
+            pthread_mutex_lock(&mutex_dcqcn);
+
+            if (time_taken > 55000)
+            {
+                time_taken = 0;
+                dcqcn_T++;
+                dcqcn_alpha = (1 - dcqcn_g) * dcqcn_alpha;
+            }
+            if (g_send_seq - dcqcn_seq_prev > 10 * 1000)
+            {
+                dcqcn_seq_prev = g_send_seq;
+                dcqcn_BC++;
+            }
+
+            if (MAX(dcqcn_T, dcqcn_BC) < 5)
+            {
+                g_send_rate = (dcqcn_rate_target + g_send_rate) / 2.0;
+            }
+            else if (MIN(dcqcn_T, dcqcn_BC) > 5)
+            {
+                dcqcn_rate_target += 0.2;
+                g_send_rate = (dcqcn_rate_target + g_send_rate) / 2.0;
+            }
+            else
+            {
+                dcqcn_rate_target += 0.05;
+                g_send_rate = (dcqcn_rate_target + g_send_rate) / 2.0;
+            }
+            g_send_rate = MIN(9.8, g_send_rate);
+            g_send_rate = MAX(0.2, g_send_rate);
+
+            g_time_require = (double)DATA_PACKET_SIZE * 8.0 / (g_send_rate / NUM_SEND_THREAD);
+            pthread_mutex_unlock(&mutex_dcqcn);
+            //fprintf(fp, "rate_send: %f\n", g_send_rate);
+        }
     }
 }
 
@@ -526,7 +576,7 @@ void *send_data(void *thread_arg)
     fprintf(trace, "flow_id, flow_size, fct, src, dst\n");
     fflush(trace);
 
-    if (g_cc_mode == LCC || g_cc_mode == STREAM)
+    if (g_cc_mode == LCC || g_cc_mode == STREAM || g_cc_mode == DCQCN)
     {
         g_time_require = (double)DATA_PACKET_SIZE * 8.0 / (g_init_rate / NUM_SEND_THREAD);
     }
@@ -550,7 +600,7 @@ void *send_data(void *thread_arg)
         flow_start = clock();
         do
         {
-            dst = rand() % 8 + 9;
+            dst = 10; //rand() % 8 + 9;
         } while (dst == g_src_ip[2]);
         g_dst_ip[2] = dst;
     }
@@ -564,10 +614,9 @@ void *send_data(void *thread_arg)
             time_taken += MIN((time_start + 1 * 1e9 - time_prev), SEND_BUCKET_LIMIT);
         time_prev = time_start;
 
-        if (time_taken >= g_time_require && data_allow_queue_head != data_allow_queue_tail && (data_queue_tail + 1) % DATA_QUEUE_LENGTH != data_queue_head || g_send_seq < 16)
+        if (time_taken >= g_time_require && data_allow_queue_head != data_allow_queue_tail && (data_queue_tail + 1) % DATA_QUEUE_LENGTH != data_queue_head)
         {
-            if (g_send_seq >= 16)
-                time_taken -= g_time_require;
+            time_taken -= g_time_require;
             if (g_cc_mode == LCC || g_cc_mode == STREAM)
             {
 
@@ -630,6 +679,19 @@ void *send_data(void *thread_arg)
                     }
                 }
             }
+            else if (g_cc_mode == DCQCN)
+            {
+                wr_id = data_allow_queue[data_allow_queue_head].wr_id;
+                data_allow_queue_head = (data_allow_queue_head + 1) % DATA_QUEUE_LENGTH;
+                //if (g_send_seq % 10000 != 0)
+                create_data_packet(buf_send + wr_id * ENTRY_SIZE, false);
+                //else
+                //    create_data_packet(buf_send + wr_id * ENTRY_SIZE, true);
+
+                data_queue[data_queue_tail].buf = buf_send + wr_id * ENTRY_SIZE;
+                data_queue[data_queue_tail].wr_id = wr_id;
+                data_queue_tail = (data_queue_tail + 1) % DATA_QUEUE_LENGTH;
+            }
         }
     outerloop:
         if (g_flow_rem <= 0)
@@ -663,7 +725,7 @@ void *send_data(void *thread_arg)
             }
             do
             {
-                dst = rand() % 8 + 9;
+                dst = 10; // rand() % 8 + 9;
             } while (dst == g_src_ip[2]);
             g_dst_ip[2] = dst;
 
@@ -683,6 +745,11 @@ void *send_data(void *thread_arg)
 
             g_send_seq = 0;
             ack_tag = 0;
+
+            dcqcn_alpha = 1;
+            dcqcn_g = 1 / 256;
+            dcqcn_BC = 0;
+            dcqcn_T = 0;
 
             time_taken = 0;
             time_prev = g_time;
@@ -920,9 +987,27 @@ void *recv_ack(void *thread_arg)
             ip = (struct iphdr *)(vlan + 1);
             lcc = (struct lcchdr_ack *)(ip + 1);
 
+            if (lcc->cnp == 1 && g_cc_mode == DCQCN)
+            {
+                pthread_mutex_lock(&mutex_dcqcn);
+                dcqcn_rate_target = g_send_rate;
+                g_send_rate = g_send_rate * (1 - dcqcn_alpha / 2);
+                g_time_require = (double)DATA_PACKET_SIZE * 8.0 / (g_send_rate / NUM_SEND_THREAD);
+
+                dcqcn_alpha = (1 - dcqcn_g) * dcqcn_alpha + dcqcn_g;
+                dcqcn_T = 0;
+                dcqcn_BC = 0;
+                dcqcn_seq_prev = g_send_seq;
+                dcqcn_time_prev = g_time;
+                pthread_mutex_unlock(&mutex_dcqcn);
+                printf("cnp_recv!! %f\n", g_send_rate);
+                    ibv_post_recv(qp, &wr_recv[wc_exp_recv.wr_id], &bad_wr_recv);
+
+                continue;
+            }
             //printf("seq: %d\n", lcc->seq);
             //If ack request is tagged
-            if (lcc->ack == 1)
+            else if (lcc->ack == 1)
             {
                 time_now_app = g_time;
                 time_now_hw = ibv_exp_cqe_ts_to_ns(&values.clock_info, wc_exp_recv.timestamp);
@@ -1056,6 +1141,9 @@ void *recv_ack(void *thread_arg)
                     //gettimeofday(&val, NULL);
                     //ptm = localtime(&val.tv_sec);
                     //fprintf(fp, "%02d%02d%02d.%06ld, %f, %f ,%ld\n", ptm->tm_hour, ptm->tm_min, ptm->tm_sec, val.tv_usec, g_recv_rate, g_send_rate, g_rtt_hw);
+                }
+                else if (g_cc_mode == DCQCN)
+                {
                 }
 
                 gettimeofday(&val, NULL);
@@ -1471,6 +1559,11 @@ int main()
                     g_cc_mode = TIMELY;
                     printf("\n Congestion control: TIMELY\n");
                 }
+                else if (strncasecmp(varBuff, "DCQCN", strlen("DCQCN")) == 0)
+                {
+                    g_cc_mode = DCQCN;
+                    printf("\n Congestion control: DCQCN\n");
+                }
                 else if (strncasecmp(varBuff, "STREAM", strlen("STREAM")) == 0)
                 {
                     g_cc_mode = STREAM;
@@ -1582,9 +1675,9 @@ int main()
     pthread_create(&send_thread, NULL, send_packet, NULL);
 
     srand(g_seed);
-    printf("\n\n\n %d, %d\n", rand(),g_seed);
+    printf("\n\n\n %d, %d\n", rand(), g_seed);
     //sleep(2);
-    usleep((rand() % 100)* 1000 + 2 * 1000 * 1000); //+ 2 * 1000 * 1000);
+    usleep((rand() % 100) * 1000 + 2 * 1000 * 1000); //+ 2 * 1000 * 1000);
 
     pthread_t send_packet_tread;
     pthread_create(&send_packet_tread, NULL, send_data, NULL);

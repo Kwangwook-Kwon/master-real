@@ -93,7 +93,8 @@ struct lcchdr_ack
             ack : 1,          /* is ACK? */
             data : 1,         /* is DATA? */
             endofdata: 1,
-            reserve : 12;
+            cnp: 1,
+            reserve : 11;
         uint32_t seq;
         uint32_t ack_time;
 };

@@ -15,7 +15,63 @@
 #include "header.h"
 #include "receiver.h"
 
-void create_ack_packet(void *buf, uint32_t seq, uint32_t ack_time, uint8_t *client_ip, bool endofdata)
+void *clock_thread_function()
+{
+
+    unsigned long mask = 64;
+    if (pthread_setaffinity_np(pthread_self(), sizeof(mask), (cpu_set_t *)&mask))
+    {
+        fprintf(stderr, "Couldn't allocate thread cpu \n");
+    }
+    struct timespec time;
+    time.tv_sec = 0;
+    time.tv_nsec = 0;
+    long time_taken, time_prev, time_start;
+    clock_gettime(CLOCK_MONOTONIC, &time);
+    g_time = time.tv_nsec;
+    time_prev = g_time;
+
+    while (1)
+    {
+        clock_gettime(CLOCK_MONOTONIC, &time);
+        g_time = time.tv_nsec;
+        time_start = g_time;
+        if (time_start >= time_prev)
+            time_taken += (time_start - time_prev);
+        else
+            time_taken += (time_start + 1 * 1e9 - time_prev);
+        time_prev = time_start;
+        if (time_taken > 50000 && g_cc_mode == DCQCN)
+        {
+            time_taken = 0;
+            for (int i = 0; i < 8; i++)
+            {
+                if (cnp_cnt[i] > 0)
+                {
+                    pthread_mutex_lock(&mutex_ack_queue);
+                    cnp_cnt[i] = 0;
+                    if ((ack_queue_tail + 1) % ACK_QUEUE_LENGTH == ack_queue_head)
+                    {
+                        printf("ERROR: ACK queue is full!!\n");
+                        exit(1);
+                    }
+                    ack_queue[ack_queue_tail].endofdata = 0;
+                    ack_queue[ack_queue_tail].seq = g_recv_seq;
+                    ack_queue[ack_queue_tail].cnp = 1;
+                    ack_queue[ack_queue_tail].ack = 0;
+                    ack_queue[ack_queue_tail].client_ip[0] = 10;
+                    ack_queue[ack_queue_tail].client_ip[1] = 0;
+                    ack_queue[ack_queue_tail].client_ip[2] = i + 9;
+                    ack_queue[ack_queue_tail].client_ip[3] = 11;
+                    ack_queue_tail = (ack_queue_tail + 1) % ACK_QUEUE_LENGTH;
+                    pthread_mutex_unlock(&mutex_ack_queue);
+                }
+            }
+        }
+    }
+}
+
+void create_ack_packet(void *buf, uint32_t seq, uint32_t ack_time, uint8_t *client_ip, bool endofdata, bool cnp, bool ack)
 {
 
     // Ether header
@@ -34,7 +90,7 @@ void create_ack_packet(void *buf, uint32_t seq, uint32_t ack_time, uint8_t *clie
     size_t ip_len = ACK_PACKET_SIZE - sizeof(struct ethhdr) - sizeof(struct vlan_hdr);
     ip->ihl = 5;
     ip->version = 4;
-    ip->tos = 64;
+    ip->tos = 0;
     ip->tot_len = htons((uint16_t)ip_len);
     ip->id = 0;
     ip->frag_off = 0;
@@ -53,9 +109,10 @@ void create_ack_packet(void *buf, uint32_t seq, uint32_t ack_time, uint8_t *clie
     lcc->dest = UDP_DST;
     lcc->len = htons((uint16_t)lcc_len);
     lcc->check = 0; //Zero means no checksum check at revciever
-    lcc->ack = 1;
+    lcc->ack = ack;
     lcc->seq = seq;
     lcc->ack_time = ack_time;
+    lcc->cnp = cnp;
     lcc->endofdata = endofdata;
 }
 
@@ -243,7 +300,7 @@ void *ack_thread_function()
     void *buf_send;
     //buf_recv = malloc(buf_size_recv);
     buf_send = malloc(buf_size_send);
-    if ( !buf_send)
+    if (!buf_send)
     {
         fprintf(stderr, "Coudln't allocate memory\n");
         exit(1);
@@ -253,7 +310,7 @@ void *ack_thread_function()
     struct ibv_mr *mr_recv, *mr_send;
     //mr_recv = ibv_reg_mr(pd, buf_recv, buf_size_recv, IBV_ACCESS_LOCAL_WRITE);
     mr_send = ibv_reg_mr(pd, buf_send, buf_size_send, IBV_ACCESS_LOCAL_WRITE);
-    if ( !mr_send)
+    if (!mr_send)
     {
         fprintf(stderr, "Couldn't register mr\n");
         exit(1);
@@ -261,7 +318,7 @@ void *ack_thread_function()
 
     /* 11. Attach all buffers to the ring */
 
-    struct ibv_sge  sg_entry_send[SQ_NUM_DESC];
+    struct ibv_sge sg_entry_send[SQ_NUM_DESC];
     struct ibv_send_wr wr_send[SQ_NUM_DESC], *bad_wr_send;
 
     for (uint64_t i = 0; i < SQ_NUM_DESC; i++)
@@ -283,8 +340,6 @@ void *ack_thread_function()
     * - if this is a single descriptor or a list (next == NULL single)
     */
 
-
-
     /* 14. Wait for CQ event upon message received, and print a message */
     int msgs_completed_recv, msgs_completed_send;
     int wr_id;
@@ -293,7 +348,7 @@ void *ack_thread_function()
     uint32_t seq, ack_time;
     struct ack_queue_items queue_item;
     uint8_t client_ip[4];
-    bool endofdata;
+    bool endofdata, cnp, ack;
     do
     {
         msgs_completed_send = ibv_poll_cq(cq_send, 1, &wc_send);
@@ -306,11 +361,13 @@ void *ack_thread_function()
             endofdata = ack_queue[ack_queue_head].endofdata;
             seq = ack_queue[ack_queue_head].seq;
             ack_time = ack_queue[ack_queue_head].ack_time;
+            cnp = ack_queue[ack_queue_head].cnp;
+            ack = ack_queue[ack_queue_head].ack;
+
             memcpy(client_ip, ack_queue[ack_queue_head].client_ip, 4);
             ack_queue_head = (ack_queue_head + 1) % ACK_QUEUE_LENGTH;
 
-
-            create_ack_packet(buf_send + wc_send.wr_id * ENTRY_SIZE, seq, ack_time, client_ip, endofdata);
+            create_ack_packet(buf_send + wc_send.wr_id * ENTRY_SIZE, seq, ack_time, client_ip, endofdata, cnp, ack);
             create_send_work_request(wr_send + wc_send.wr_id, sg_entry_send + wc_send.wr_id, mr_send, buf_send + wc_send.wr_id * ENTRY_SIZE, wc_send.wr_id, ACK);
             ret = ibv_post_send(qp, wr_send + wc_send.wr_id, &bad_wr_send);
             if (ret < 0)
@@ -349,7 +406,7 @@ void *recv_thread_function(void *thread_arg)
     //cq_send = ibv_create_cq(context, SQ_NUM_DESC, NULL, NULL, 0);
     //cq_recv = ibv_create_cq(context, RQ_NUM_DESC, NULL, NULL, 0);
 
-    if (!cq_recv)// || !cq_send)
+    if (!cq_recv) // || !cq_send)
     {
         fprintf(stderr, "Couldn't create CQ %d\n", errno);
         exit(1);
@@ -427,7 +484,7 @@ void *recv_thread_function(void *thread_arg)
     void *buf_recv, *buf_send;
     buf_recv = malloc(buf_size_recv);
     //buf_send = malloc(buf_size_send);
-    if (!buf_recv )//|| !buf_send)
+    if (!buf_recv) //|| !buf_send)
     {
         fprintf(stderr, "Coudln't allocate memory\n");
         exit(1);
@@ -437,7 +494,7 @@ void *recv_thread_function(void *thread_arg)
     struct ibv_mr *mr_recv;
     mr_recv = ibv_reg_mr(pd, buf_recv, buf_size_recv, IBV_ACCESS_LOCAL_WRITE);
     //mr_send = ibv_reg_mr(pd, buf_send, buf_size_send, IBV_ACCESS_LOCAL_WRITE);
-    if (!mr_recv )//|| !mr_send)
+    if (!mr_recv) //|| !mr_send)
     {
         fprintf(stderr, "Couldn't register mr\n");
         exit(1);
@@ -445,10 +502,9 @@ void *recv_thread_function(void *thread_arg)
 
     /* 11. Attach all buffers to the ring */
 
-    struct ibv_sge sg_entry_recv[RQ_NUM_DESC];//;, sg_entry_send[SQ_NUM_DESC];
+    struct ibv_sge sg_entry_recv[RQ_NUM_DESC]; //;, sg_entry_send[SQ_NUM_DESC];
     struct ibv_recv_wr wr_recv[RQ_NUM_DESC], *bad_wr_recv;
     //struct ibv_send_wr wr_send[SQ_NUM_DESC], *bad_wr_send;
-
 
     /*
     * descriptor for receive transaction - details:
@@ -524,6 +580,16 @@ void *recv_thread_function(void *thread_arg)
     struct ibv_exp_wc wc_exp_recv;
     unsigned char *output;
     int flow_id = 0;
+
+    struct timespec time, time_prev;
+    time.tv_sec = 0;
+    time.tv_nsec = 0;
+
+    clock_gettime(CLOCK_MONOTONIC, &time);
+    g_time = time.tv_nsec;
+    uint16_t time_taken;
+    uint8_t addr[4];
+
     while (1)
     {
 
@@ -543,23 +609,36 @@ void *recv_thread_function(void *thread_arg)
             struct vlan_hdr *vlan = (struct vlan_hdr *)(eth + 1);
             struct iphdr *ip = (struct iphdr *)(vlan + 1);
             struct lcchdr *lcc = (struct lcchdr *)(ip + 1);
+            //struct toshdr *tos = (struct toshdr *)&(ip->tos);
             //printf("recved: %d\n", lcc->seq);
             //g_total_recv += wc_exp_recv.byte_len - sizeof(struct ethhdr) - sizeof(struct vlan_hdr) - sizeof(struct iphdr)- sizeof(struct lcchdr);
 
-            //If ack request is tagged
+            if ((ip->tos & 3) == 3 && g_cc_mode == DCQCN)
+            {
+                memcpy(&addr, &ip->saddr, 4);
+
+                pthread_mutex_lock(&cnp);
+                cnp_cnt[addr[2] - 9]++;
+                pthread_mutex_unlock(&cnp);
+            }
             if (lcc->ackReq == 1)
             {
+                //printf("seq: %d\n", lcc->seq);
+                pthread_mutex_lock(&mutex_ack_queue);
 
                 if ((ack_queue_tail + 1) % ACK_QUEUE_LENGTH == ack_queue_head)
                 {
                     printf("ERROR: ACK queue is full!!\n");
                     exit(1);
-                }               
+                }
                 ack_queue[ack_queue_tail].endofdata = lcc->endofdata;
                 ack_queue[ack_queue_tail].seq = lcc->seq;
+                ack_queue[ack_queue_tail].cnp = 0;
+                ack_queue[ack_queue_tail].ack = 1;
                 ack_queue[ack_queue_tail].ack_time = ibv_exp_cqe_ts_to_ns(&values.clock_info, wc_exp_recv.timestamp);
                 memcpy(&ack_queue[ack_queue_tail].client_ip, &ip->saddr, 4);
                 ack_queue_tail = (ack_queue_tail + 1) % ACK_QUEUE_LENGTH;
+                pthread_mutex_unlock(&mutex_ack_queue);
             }
             g_recv_seq = lcc->seq;
             ibv_post_recv(qp, &wr_recv[wc_exp_recv.wr_id], &bad_wr_recv);
@@ -628,6 +707,37 @@ int main()
                        &g_dst_mac_addr[0], &g_dst_mac_addr[1], &g_dst_mac_addr[2],
                        &g_dst_mac_addr[3], &g_dst_mac_addr[4], &g_dst_mac_addr[5]);
             }
+            if (strncasecmp(readBuff, "CC_MODE", strlen("CC_MODE")) == 0)
+            {
+                strcpy(varBuff, strrchr(readBuff, '=') + 1);
+                if (strncasecmp(varBuff, "LCC", strlen("LCC")) == 0)
+                {
+                    g_cc_mode = LCC;
+                    printf("\n Congestion control: LCC\n");
+                }
+                else if (strncasecmp(varBuff, "TIMELY", strlen("TIMELY")) == 0)
+                {
+                    g_cc_mode = TIMELY;
+                    printf("\n Congestion control: TIMELY\n");
+                }
+                else if (strncasecmp(varBuff, "DCQCN", strlen("DCQCN")) == 0)
+                {
+                    g_cc_mode = DCQCN;
+                    printf("\n Congestion control: DCQCN\n");
+                }
+                else if (strncasecmp(varBuff, "STREAM", strlen("STREAM")) == 0)
+                {
+                    g_cc_mode = STREAM;
+                    printf("\n Congestion control: STREAM\n");
+                }
+                else if (strncasecmp(varBuff, "RECV", strlen("RECV")) == 0)
+                    g_cc_mode = RECV;
+                else
+                {
+                    fprintf(stderr, "Congestion control mode invalid!!\n Use one of LCC, TIMELY, STREAM ");
+                    exit(1);
+                }
+            }
         }
     }
     printf("\n\n Read End...\n\n");
@@ -674,6 +784,9 @@ int main()
 
     pthread_t ack_tread;
     pthread_create(&ack_tread, NULL, ack_thread_function, NULL);
+
+    pthread_t clock_thread;
+    pthread_create(&clock_thread, NULL, clock_thread_function, NULL);
 
     /* 4. Create sending threads */
     pthread_t p_thread[1];

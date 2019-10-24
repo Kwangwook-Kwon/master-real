@@ -73,8 +73,21 @@ struct ack_queue_items{
     uint32_t ack_time;
     uint8_t client_ip[4];
     uint8_t tos;
+    bool cnp;
+    bool ack;
     bool endofdata;
 };
+
+
+enum CC_mode
+{
+    LCC,
+    TIMELY,
+    DCQCN,
+    STREAM,
+    RECV
+};
+
 
 uint64_t buf_size_send = ENTRY_SIZE * SQ_NUM_DESC; /* maximum size of data to be access directly by hw */
 uint64_t buf_size_recv = ENTRY_SIZE * RQ_NUM_DESC; /* maximum size of data to be access directly by hw */
@@ -95,13 +108,18 @@ static long g_time;
 static short g_vlan_id;
 static int ack_queue_head = 0, ack_queue_tail = 0;
 static struct ack_queue_items ack_queue[ACK_QUEUE_LENGTH];
+static enum CC_mode g_cc_mode;
+static uint32_t cnp_cnt[8] = {0,0,0,0,0,0,0,0};
+
 
 pthread_mutex_t mutex_ack_queue;
 pthread_mutex_t mutex_g_recv_data;
+pthread_mutex_t cnp;
 
 
+void *clock_thread_function();
 void create_data_packet(void *buf);
-void create_ack_packet(void *buf, uint32_t seq, uint32_t ack_time, uint8_t *client_ip, bool endofdata);
+void create_ack_packet(void *buf, uint32_t seq, uint32_t ack_time, uint8_t *client_ip, bool endofdata, bool cnp, bool ack);
 void create_send_work_request(struct ibv_send_wr *, struct ibv_sge *, struct ibv_mr *, void *, uint64_t, enum Packet_type);
 void create_recv_work_request(struct ibv_qp *, struct ibv_recv_wr *, struct ibv_sge *, struct ibv_mr *, void *, struct raw_eth_flow_attr *);
 void *clock_thread_function();

@@ -32,7 +32,9 @@
  
 
 #define UDP_SRC 12357
-#define UDP_DST 0xb711
+#define UDP_DST_DCQCN 0xB712
+#define UDP_DST 0xB711
+
 
 #define INPUT_CDF_FILE "workload/workload_mining.tcl"
 
@@ -57,6 +59,7 @@ enum CC_mode
 {
     LCC,
     TIMELY,
+    DCQCN,
     STREAM,
     RECV
 };
@@ -64,7 +67,8 @@ enum CC_mode
 enum Flow_mode
 {
     INFINITE,
-    DYNAMIC
+    DYNAMIC,
+    ONCE
 };
 
 enum Packet_type
@@ -166,6 +170,18 @@ static double g_rate_diff;
 static double g_normalize_gradient;
 static enum CC_mode g_cc_mode;
 static enum Flow_mode g_flow_mode;
+
+
+double dcqcn_rate_target = 9.8;
+double dcqcn_alpha = 1;
+double dcqcn_g = 1.0 / 256.0;
+int dcqcn_T, dcqcn_BC = 0;
+long dcqcn_time_prev= 0;
+uint64_t dcqcn_seq_prev = 0;
+
+
+pthread_mutex_t mutex_dcqcn;
+
 
 pthread_mutex_t mutex_sender_thread;
 pthread_mutex_t mutex_flow_complete_flag;
