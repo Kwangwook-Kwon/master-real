@@ -681,6 +681,19 @@ void *send_data(void *thread_arg)
             else
                 g_ack_req_inv = 16;
 
+            if (g_cc_mode == LCC || g_cc_mode == STREAM)
+            {
+                g_time_require = (double)DATA_PACKET_SIZE * 8.0 / (g_init_rate / NUM_SEND_THREAD);
+            }
+
+            else if (g_cc_mode == TIMELY)
+            {
+                g_time_require = (double)DATA_PACKET_SIZE * 8.0 * 16 / (g_init_rate / NUM_SEND_THREAD);
+                g_ack_req_inv = 16;
+            }
+
+            g_send_rate = g_init_rate;
+
             g_send_seq = 0;
             ack_tag = 0;
 
@@ -1582,9 +1595,9 @@ int main()
     pthread_create(&send_thread, NULL, send_packet, NULL);
 
     srand(g_seed);
-    printf("\n\n\n %d, %d\n", rand(),g_seed);
+    printf("\n\n\n %d, %d\n", rand(), g_seed);
     //sleep(2);
-    usleep((rand() % 100)* 1000 + 2 * 1000 * 1000); //+ 2 * 1000 * 1000);
+    usleep((rand() % 100) * 1000 + 2 * 1000 * 1000); //+ 2 * 1000 * 1000);
 
     pthread_t send_packet_tread;
     pthread_create(&send_packet_tread, NULL, send_data, NULL);
