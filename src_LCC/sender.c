@@ -600,7 +600,7 @@ void *send_data(void *thread_arg)
         flow_start = clock();
         do
         {
-            dst = 10; //rand() % 8 + 9;
+            dst = rand() % 8 + 9;
         } while (dst == g_src_ip[2]);
         g_dst_ip[2] = dst;
     }
@@ -725,7 +725,7 @@ void *send_data(void *thread_arg)
             }
             do
             {
-                dst = 10; // rand() % 8 + 9;
+                dst = rand() % 8 + 9;
             } while (dst == g_src_ip[2]);
             g_dst_ip[2] = dst;
 
@@ -742,6 +742,19 @@ void *send_data(void *thread_arg)
                 g_ack_req_inv = 8;
             else
                 g_ack_req_inv = 16;
+
+            if (g_cc_mode == LCC || g_cc_mode == STREAM || g_cc_mode == DCQCN)
+            {
+                g_time_require = (double)DATA_PACKET_SIZE * 8.0 / (g_init_rate / NUM_SEND_THREAD);
+            }
+
+            else if (g_cc_mode == TIMELY)
+            {
+                g_time_require = (double)DATA_PACKET_SIZE * 8.0 * 16 / (g_init_rate / NUM_SEND_THREAD);
+                g_ack_req_inv = 16;
+            }
+
+            g_send_rate = g_init_rate;
 
             g_send_seq = 0;
             ack_tag = 0;
@@ -1000,8 +1013,8 @@ void *recv_ack(void *thread_arg)
                 dcqcn_seq_prev = g_send_seq;
                 dcqcn_time_prev = g_time;
                 pthread_mutex_unlock(&mutex_dcqcn);
-                printf("cnp_recv!! %f\n", g_send_rate);
-                    ibv_post_recv(qp, &wr_recv[wc_exp_recv.wr_id], &bad_wr_recv);
+                //printf("cnp_recv!! %f\n", g_send_rate);
+                ibv_post_recv(qp, &wr_recv[wc_exp_recv.wr_id], &bad_wr_recv);
 
                 continue;
             }
@@ -1695,10 +1708,10 @@ int main()
         gettimeofday(&val, NULL);
         ptm = localtime(&val.tv_sec);
 
-        if (g_recv_rate > 0)
-        {
-            sleep_cnt++;
-        }
+        //if (g_recv_rate > 0)
+        //}
+        sleep_cnt++;
+        //}
         if (sleep_cnt > 10000)
         {
             printf("%02d%02d%02d.%06ld, %f, %f, %ld, %d, %d, %ld\n", ptm->tm_hour, ptm->tm_min, ptm->tm_sec, val.tv_usec, g_recv_rate, g_send_rate, g_rtt_hw, g_ack_req_inv, g_flow_id, g_flow_size);

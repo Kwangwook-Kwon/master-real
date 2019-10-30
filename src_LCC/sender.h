@@ -36,7 +36,7 @@
 #define UDP_DST 0xB711
 
 
-#define INPUT_CDF_FILE "workload/workload_mining.tcl"
+#define INPUT_CDF_FILE "workload/workload_search.tcl"
 
 #define MAX(a,b)\
 ({ __typeof__ (a) _a = (a);\
