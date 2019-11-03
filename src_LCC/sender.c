@@ -550,7 +550,7 @@ void *send_data(void *thread_arg)
         flow_start = clock();
         do
         {
-            dst = rand() % 8 + 9;
+                dst = rand() % 4 + 9;
         } while (dst == g_src_ip[2]);
         g_dst_ip[2] = dst;
     }
@@ -663,7 +663,7 @@ void *send_data(void *thread_arg)
             }
             do
             {
-                dst = rand() % 8 + 9;
+                dst = rand() % 4 + 9;
             } while (dst == g_src_ip[2]);
             g_dst_ip[2] = dst;
 
