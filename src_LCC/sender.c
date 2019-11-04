@@ -600,7 +600,7 @@ void *send_data(void *thread_arg)
         flow_start = clock();
         do
         {
-            dst = rand() % 8 + 9;
+            dst = 10;//rand() % 8 + 9;
         } while (dst == g_src_ip[2]);
         g_dst_ip[2] = dst;
     }
@@ -683,10 +683,10 @@ void *send_data(void *thread_arg)
             {
                 wr_id = data_allow_queue[data_allow_queue_head].wr_id;
                 data_allow_queue_head = (data_allow_queue_head + 1) % DATA_QUEUE_LENGTH;
-                //if (g_send_seq % 10000 != 0)
-                create_data_packet(buf_send + wr_id * ENTRY_SIZE, false);
-                //else
-                //    create_data_packet(buf_send + wr_id * ENTRY_SIZE, true);
+                if (g_send_seq % 100 != 0)
+                    create_data_packet(buf_send + wr_id * ENTRY_SIZE, false);
+                else
+                    create_data_packet(buf_send + wr_id * ENTRY_SIZE, true);
 
                 data_queue[data_queue_tail].buf = buf_send + wr_id * ENTRY_SIZE;
                 data_queue[data_queue_tail].wr_id = wr_id;
@@ -725,7 +725,7 @@ void *send_data(void *thread_arg)
             }
             do
             {
-                dst = rand() % 8 + 9;
+                dst = 10;//rand() % 8 + 9;
             } while (dst == g_src_ip[2]);
             g_dst_ip[2] = dst;
 
