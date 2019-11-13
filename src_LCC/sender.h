@@ -88,7 +88,6 @@ struct Thread_arg
 struct Sent_queue
 {
     bool endofdata;
-    long sent_time_app;
     uint32_t sent_time_hw;
     uint32_t seq;
 };
@@ -175,10 +174,9 @@ void create_data_packet(void *buf, bool ack);
 void create_ack_packet(void *buf, uint32_t seq, uint32_t ack_time, uint8_t *client_ip);
 void create_send_work_request(struct ibv_send_wr *, struct ibv_sge *, struct ibv_mr *, void *, uint64_t, enum Packet_type);
 void create_recv_work_request(struct ibv_qp *, struct ibv_recv_wr *, struct ibv_sge *, struct ibv_mr *, void *, struct raw_eth_flow_attr *);
-void *send_data(void *Thread_arg);
-void *recv_ack(void *Thread_arg);
-void *recv_data(void *thread_arg);
-void *send_data(void *thread_arg);
+void *gen_data_packet(void *Thread_arg);
+void *recv_packet(void *Thread_arg);
+void *gen_data_packet(void *thread_arg);
 void *clock_thread_function();
 double find_median(double *rate_array, int arry_p);
 void swap(double *a, double *b);

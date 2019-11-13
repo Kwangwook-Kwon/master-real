@@ -151,7 +151,7 @@ static uint16_t gen_ip_checksum(const char *buf, int num_bytes)
     return sum;
 }
 
-void *ack_thread_function()
+void *send_packet()
 {
 
     unsigned long mask = 1;
@@ -326,7 +326,7 @@ void *ack_thread_function()
     }
 }
 
-void *recv_thread_function(void *thread_arg)
+void *recv_packet(void *thread_arg)
 {
 
     unsigned long mask = 2;
@@ -673,7 +673,7 @@ int main()
     }
 
     pthread_t ack_tread;
-    pthread_create(&ack_tread, NULL, ack_thread_function, NULL);
+    pthread_create(&ack_tread, NULL, send_packet, NULL);
 
     /* 4. Create sending threads */
     pthread_t p_thread[1];
@@ -684,7 +684,7 @@ int main()
     {
         thread_arg[i].thread_id = i;
         thread_arg[i].thread_action = SENDING_AND_RECEVING;
-        pthread_create(&p_thread[i], NULL, recv_thread_function, (void *)(thread_arg + i));
+        pthread_create(&p_thread[i], NULL, recv_packet, (void *)(thread_arg + i));
     }
     double time_require = 10;
     struct timespec start, previous;

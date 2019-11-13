@@ -105,6 +105,6 @@ void create_ack_packet(void *buf, uint32_t seq, uint32_t ack_time, uint8_t *clie
 void create_send_work_request(struct ibv_send_wr *, struct ibv_sge *, struct ibv_mr *, void *, uint64_t, enum Packet_type);
 void create_recv_work_request(struct ibv_qp *, struct ibv_recv_wr *, struct ibv_sge *, struct ibv_mr *, void *, struct raw_eth_flow_attr *);
 void *clock_thread_function();
-void *recv_thread_function(void *Thread_arg);
+void *recv_packet(void *Thread_arg);
 static uint16_t gen_ip_checksum(const char *buf, int num_bytes);
 
